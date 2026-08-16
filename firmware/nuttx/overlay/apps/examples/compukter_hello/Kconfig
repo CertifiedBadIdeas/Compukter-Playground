@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config EXAMPLES_COMPUKTER_HELLO
+	tristate "Compukter NuttX acceptance command"
+	default n
+
+if EXAMPLES_COMPUKTER_HELLO
+
+config EXAMPLES_COMPUKTER_HELLO_PROGNAME
+	string "Program name"
+	default "hello"
+
+config EXAMPLES_COMPUKTER_HELLO_PRIORITY
+	int "Task priority"
+	default 100
+
+config EXAMPLES_COMPUKTER_HELLO_STACKSIZE
+	int "Task stack size"
+	default 2048
+
+endif
