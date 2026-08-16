@@ -28,7 +28,8 @@ const PANEL: Color = Color::rgba(0.075, 0.094, 0.125, 1.0);
 const BORDER: Color = Color::rgba(0.18, 0.22, 0.29, 1.0);
 const TEXT: Color = Color::rgba(0.88, 0.91, 0.96, 1.0);
 const MUTED: Color = Color::rgba(0.55, 0.62, 0.72, 1.0);
-const ACCENT: Color = Color::rgba(0.19, 0.55, 0.91, 1.0);
+const BUTTON_BACKGROUND: Color = Color::rgba(0.090, 0.196, 0.302, 1.0);
+const BUTTON_BORDER: Color = Color::rgba(0.192, 0.341, 0.475, 1.0);
 
 type SharedViewModel = Arc<Mutex<PlaygroundViewModel>>;
 
@@ -342,16 +343,21 @@ fn status_bar(view_model: &SharedViewModel, snapshot: Option<&RuntimeSnapshot>) 
 }
 
 fn action_button(
-    ctx: &WindowedContext,
-    key: &'static str,
+    _ctx: &WindowedContext,
+    _key: &'static str,
     label: impl Into<String>,
     action: impl Fn() + Send + Sync + 'static,
-) -> Button {
-    button(ctx.use_state_for(key, ButtonState::Idle), label)
-        .bg_color(ACCENT)
-        .hover_color(Color::rgba(0.25, 0.64, 1.0, 1.0))
-        .text_color(TEXT)
-        .text_size(12.0)
+) -> Div {
+    div()
+        .px(3.0)
+        .py(1.5)
+        .rounded(6.0)
+        .bg(BUTTON_BACKGROUND)
+        .border(1.0, BUTTON_BORDER)
+        .cursor_pointer()
+        .items_center()
+        .justify_center()
+        .child(text(label).size(12.0).color(TEXT))
         .on_click(move |_| action())
 }
 
