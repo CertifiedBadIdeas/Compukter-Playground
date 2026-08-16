@@ -83,6 +83,15 @@ SECTIONS
 
   __image_end = .;
 
+  /* Describe the idle stack and dynamic heap as writable guest RAM without
+   * adding zero-filled bytes to the ELF artifact or widening _ebss.
+   */
+
+  .ram (NOLOAD) :
+  {
+    . = CONFIG_RAM_END;
+  } :data
+
   .riscv.attributes 0 : { *(.riscv.attributes) }
   .comment 0 : { *(.comment) }
   .debug 0 : { *(.debug*) }
