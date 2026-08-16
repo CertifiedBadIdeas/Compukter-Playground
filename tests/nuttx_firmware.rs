@@ -72,6 +72,18 @@ fn nuttx_boots_nsh_and_runs_builtin_over_uart() {
     assert_eq!(prompt.inspection.plic.sources[0].priority, 1);
     assert!(prompt.inspection.plic.sources[0].enabled);
 
+    let initial_time = prompt.inspection.timer.time;
+    let initial_compare = prompt.inspection.timer.compare;
+    let rearmed = wait_for_snapshot(&runtime, Duration::from_secs(10), |snapshot| {
+        snapshot.inspection.timer.time > initial_time
+            && snapshot.inspection.timer.time >= initial_compare
+            && snapshot.inspection.timer.compare > initial_compare
+            && snapshot.inspection.timer.compare > snapshot.inspection.timer.time
+            && snapshot.outcome == RuntimeOutcome::WaitingForInterrupt
+            && snapshot.inspection.hart.waiting_for_interrupt
+    });
+    assert!(rearmed.error.is_none());
+
     runtime
         .command(RuntimeCommand::SendUart(b"hello\n".to_vec()))
         .unwrap();
@@ -93,23 +105,68 @@ fn nuttx_boots_nsh_and_runs_builtin_over_uart() {
         thread::sleep(Duration::from_millis(10));
     }
 
+    let prompts_before_help = occurrence_count(
+        &runtime
+            .snapshot()
+            .expect("runtime snapshot after hello")
+            .terminal
+            .raw_bytes,
+        b"nsh>",
+    );
     runtime
         .command(RuntimeCommand::SendUart(b"help\n".to_vec()))
         .unwrap();
-    let help = runtime.wait_for(
-        |snapshot| {
-            snapshot
-                .terminal
-                .raw_bytes
-                .windows(b"Builtin Apps:".len())
-                .any(|part| part == b"Builtin Apps:")
-        },
-        Duration::from_secs(10),
-    );
+    let help = wait_for_snapshot(&runtime, Duration::from_secs(10), |snapshot| {
+        snapshot
+            .terminal
+            .raw_bytes
+            .windows(b"Builtin Apps:".len())
+            .any(|part| part == b"Builtin Apps:")
+            && occurrence_count(&snapshot.terminal.raw_bytes, b"nsh>") > prompts_before_help
+            && snapshot.outcome == RuntimeOutcome::WaitingForInterrupt
+            && snapshot.inspection.hart.waiting_for_interrupt
+    });
     assert!(help.error.is_none());
     assert_eq!(help.inspection.plic.sources[0].priority, 1);
     assert!(help.inspection.plic.sources[0].enabled);
     assert!(!help.inspection.plic.sources[0].in_flight);
+}
+
+fn wait_for_snapshot(
+    runtime: &RuntimeHandle,
+    timeout: Duration,
+    predicate: impl Fn(&compukter_playground::runtime::RuntimeSnapshot) -> bool,
+) -> std::sync::Arc<compukter_playground::runtime::RuntimeSnapshot> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(snapshot) = runtime.snapshot() {
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+            if snapshot.error.is_some()
+                || matches!(
+                    snapshot.outcome,
+                    RuntimeOutcome::Faulted
+                        | RuntimeOutcome::Halted(_)
+                        | RuntimeOutcome::Panicked(_)
+                )
+                || Instant::now() >= deadline
+            {
+                panic!(
+                    "NuttX did not reach expected state:\n{}",
+                    diagnostic(&snapshot)
+                );
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn occurrence_count(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|part| *part == needle)
+        .count()
 }
 
 fn diagnostic(snapshot: &compukter_playground::runtime::RuntimeSnapshot) -> String {
