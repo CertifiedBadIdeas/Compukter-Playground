@@ -43,6 +43,18 @@ missing `-lxdo` linker error specifically means `xdotool` is absent.
 
 ## Run
 
+Build the bundled RV32IM firmware first:
+
+```sh
+./scripts/build-firmware.sh
+```
+
+This creates the ignored local artifact `profiles/firmware.elf`. The firmware
+prints `Compukter Playground UART ready`, configures UART receive interrupts
+through the PLIC, sleeps with `WFI` while idle, and echoes terminal input.
+
+Then start the workbench:
+
 ```sh
 cargo run --release
 ```
@@ -59,6 +71,7 @@ Headless tests do not start a window:
 
 ```sh
 cargo test --lib
+cargo test --test uart_firmware
 cargo check --all-targets
 ```
 
