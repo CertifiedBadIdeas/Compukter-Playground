@@ -47,8 +47,10 @@ missing `-lxdo` linker error specifically means `xdotool` is absent.
 cargo run --release
 ```
 
-Open a TOML profile from the toolbar. The firmware path is resolved relative
-to that profile, so a profile and its ELF can be moved together. See
+The Playground scans direct TOML children of `profiles/`, automatically tries
+`profiles/default.toml` (or the first profile alphabetically), and exposes the
+catalog through the toolbar selector. The firmware path is resolved relative
+to its profile, so each profile and its ELF can be moved together. See
 [`profiles/default.toml`](profiles/default.toml).
 
 ## Verify

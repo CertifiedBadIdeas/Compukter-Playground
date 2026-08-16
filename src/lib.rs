@@ -10,6 +10,7 @@
  */
 
 pub mod profile;
+pub mod profile_catalog;
 pub mod runtime;
 pub mod terminal;
 pub mod view_model;

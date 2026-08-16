@@ -19,6 +19,7 @@ use blinc_app::prelude::*;
 use blinc_app::windowed::{WindowedApp, WindowedContext};
 
 use compukter_playground::profile::RuntimeMode;
+use compukter_playground::profile_catalog::ProfileEntry;
 use compukter_playground::runtime::{RuntimeCommand, RuntimeSnapshot};
 use compukter_playground::terminal::TerminalMode;
 use compukter_playground::view_model::PlaygroundViewModel;
@@ -36,7 +37,9 @@ const BUTTON_HOVER_BORDER: Color = Color::rgba(0.255, 0.443, 0.608, 1.0);
 type SharedViewModel = Arc<Mutex<PlaygroundViewModel>>;
 
 pub fn run() -> Result<()> {
-    let view_model = Arc::new(Mutex::new(PlaygroundViewModel::default()));
+    let view_model = Arc::new(Mutex::new(PlaygroundViewModel::from_profiles_dir(
+        "profiles",
+    )));
     let uart_input = text_input_state_with_placeholder("UART input");
     let poller_started = Arc::new(AtomicBool::new(false));
     let poller_running = Arc::new(AtomicBool::new(true));
@@ -74,12 +77,6 @@ fn workbench(
     uart_input: &SharedTextInputState,
 ) -> Div {
     let snapshot = view_model.lock().unwrap().snapshot();
-    let profile_label = view_model
-        .lock()
-        .unwrap()
-        .profile_path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "No profile loaded".to_string());
 
     div()
         .w(ctx.width)
@@ -89,7 +86,6 @@ fn workbench(
         .gap(2.0)
         .p(3.0)
         .child(toolbar(ctx, view_model, snapshot.as_deref()))
-        .child(text(profile_label).size(12.0).color(MUTED))
         .child(
             div()
                 .flex_row()
@@ -121,20 +117,7 @@ fn toolbar(
         .gap(2.0)
         .items_center()
         .child(text("Compukter Playground").size(20.0).color(TEXT))
-        .child(action_button(ctx, "open", "Open profile", {
-            let view_model = Arc::clone(view_model);
-            move || {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Compukter profile", &["toml"])
-                    .pick_file()
-                {
-                    let result = view_model.lock().unwrap().open_profile(&path);
-                    if let Err(error) = result {
-                        view_model.lock().unwrap().set_status_error(error);
-                    }
-                }
-            }
-        }))
+        .child(profile_selector(ctx, view_model))
         .child(action_button(ctx, "save", "Save", {
             let view_model = Arc::clone(view_model);
             move || {
@@ -176,6 +159,117 @@ fn toolbar(
                 }),
             ),
         ))
+}
+
+fn profile_selector(ctx: &WindowedContext, view_model: &SharedViewModel) -> Div {
+    let view_model_guard = view_model.lock().unwrap();
+    let active_name = view_model_guard
+        .profile_path()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Select profile".to_string());
+    let entries = view_model_guard.profiles().to_vec();
+    drop(view_model_guard);
+
+    let hovered = ctx.use_state_keyed("profile-selector", || false);
+    let (background, border) = button_colors(hovered.get());
+    let selector = div()
+        .px(3.0)
+        .py(1.5)
+        .rounded(6.0)
+        .bg(background)
+        .border(1.0, border)
+        .items_center()
+        .justify_center()
+        .child(
+            text(format!("Profile: {active_name}"))
+                .size(12.0)
+                .color(TEXT)
+                .no_cursor(),
+        );
+
+    if entries.is_empty() {
+        return selector;
+    }
+
+    let overlay_manager = ctx.overlay_manager();
+    let view_model = Arc::clone(view_model);
+    selector
+        .cursor_pointer()
+        .on_hover_enter({
+            let hovered = hovered.clone();
+            move |_| hovered.set(true)
+        })
+        .on_hover_leave(move |_| hovered.set(false))
+        .on_click(move |event| {
+            let entries = entries.clone();
+            let view_model = Arc::clone(&view_model);
+            let manager_for_content = Arc::clone(&overlay_manager);
+            let width = event.bounds_width.max(180.0);
+            let height = entries.len() as f32 * 28.0 + 4.0;
+            overlay_manager
+                .dropdown()
+                .at(event.bounds_x, event.bounds_y + event.bounds_height)
+                .size(width, height)
+                .dismiss_on_escape(true)
+                .dismiss_on_click_outside(true)
+                .animation(OverlayAnimation::none())
+                .content(move || {
+                    profile_dropdown(
+                        &entries,
+                        Arc::clone(&view_model),
+                        Arc::clone(&manager_for_content),
+                        width,
+                    )
+                })
+                .show();
+        })
+}
+
+fn profile_dropdown(
+    entries: &[ProfileEntry],
+    view_model: SharedViewModel,
+    overlay_manager: OverlayManager,
+    width: f32,
+) -> Div {
+    let mut menu = div()
+        .w(width)
+        .flex_col()
+        .gap(1.0)
+        .p(1.0)
+        .rounded(6.0)
+        .bg(PANEL)
+        .border(1.0, BORDER);
+
+    for entry in entries {
+        let name = entry.name().to_owned();
+        let state_key = format!("profile-entry:{name}");
+        let view_model = Arc::clone(&view_model);
+        let overlay_manager = Arc::clone(&overlay_manager);
+        menu = menu.child(
+            Stateful::with_shared_state(use_shared_state::<ButtonState>(&state_key))
+                .w_full()
+                .h(27.0)
+                .px(3.0)
+                .items_center()
+                .rounded(5.0)
+                .cursor_pointer()
+                .child(text(name.clone()).size(12.0).color(TEXT).no_cursor())
+                .on_state(|state, item| {
+                    let hovered = matches!(state, ButtonState::Hovered | ButtonState::Pressed);
+                    let (background, border) = button_colors(hovered);
+                    *item = item.swap().bg(background).border(1.0, border);
+                })
+                .on_click(move |_| {
+                    let result = view_model.lock().unwrap().select_profile(&name);
+                    if let Err(error) = result {
+                        view_model.lock().unwrap().set_status_error(error);
+                    }
+                    overlay_manager.close_top();
+                }),
+        );
+    }
+    menu
 }
 
 fn terminal_panel(

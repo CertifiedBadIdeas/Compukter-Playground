@@ -15,10 +15,12 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::profile::{MachineProfile, ProfileError};
+use crate::profile_catalog::{ProfileCatalog, ProfileEntry};
 use crate::runtime::{RuntimeCommand, RuntimeError, RuntimeHandle, RuntimeSnapshot};
 
 #[derive(Debug, Default)]
 pub struct PlaygroundViewModel {
+    catalog: Option<ProfileCatalog>,
     profile_path: Option<PathBuf>,
     profile: Option<MachineProfile>,
     runtime: Option<RuntimeHandle>,
@@ -26,6 +28,31 @@ pub struct PlaygroundViewModel {
 }
 
 impl PlaygroundViewModel {
+    pub fn from_profiles_dir(directory: impl AsRef<Path>) -> Self {
+        let mut view_model = Self::default();
+        match ProfileCatalog::scan(directory.as_ref()) {
+            Ok(catalog) => {
+                let startup_profile = catalog.startup_entry().name().to_owned();
+                view_model.catalog = Some(catalog);
+                if let Err(error) = view_model.select_profile(&startup_profile) {
+                    view_model.set_status_error(error);
+                }
+            }
+            Err(error) => view_model.set_status_error(error),
+        }
+        view_model
+    }
+
+    pub fn select_profile(&mut self, name: &str) -> Result<(), ViewModelError> {
+        let path = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.find(name))
+            .map(|entry| entry.path().to_owned())
+            .ok_or_else(|| ViewModelError::UnknownProfile(name.to_owned()))?;
+        self.open_profile(&path)
+    }
+
     pub fn open_profile(&mut self, path: &Path) -> Result<(), ViewModelError> {
         let profile = MachineProfile::load(path)?;
         let firmware_path = profile.resolve_firmware(path);
@@ -70,6 +97,10 @@ impl PlaygroundViewModel {
         self.profile_path.as_deref()
     }
 
+    pub fn profiles(&self) -> &[ProfileEntry] {
+        self.catalog.as_ref().map_or(&[], ProfileCatalog::entries)
+    }
+
     pub fn profile(&self) -> Option<&MachineProfile> {
         self.profile.as_ref()
     }
@@ -96,14 +127,21 @@ pub enum ViewModelError {
     Runtime(#[from] RuntimeError),
     #[error("no machine profile is open")]
     NoProfile,
+    #[error("profile {0} is not present in the profile catalog")]
+    UnknownProfile(String),
     #[error("no VM is running")]
     NoMachine,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{PlaygroundViewModel, ViewModelError};
+    use crate::profile::MachineProfile;
+    use crate::profile_catalog::ProfileCatalog;
     use crate::runtime::RuntimeCommand;
+    use tempfile::tempdir;
 
     #[test]
     fn commands_require_an_open_machine() {
@@ -114,5 +152,48 @@ mod tests {
             Err(ViewModelError::NoMachine)
         ));
         assert!(view_model.snapshot().is_none());
+    }
+
+    #[test]
+    fn startup_keeps_catalog_when_default_profile_cannot_load() {
+        let temporary = tempdir().unwrap();
+        let profiles = temporary.path().join("profiles");
+        fs::create_dir(&profiles).unwrap();
+        MachineProfile::default()
+            .save(&profiles.join("default.toml"))
+            .unwrap();
+
+        let view_model = PlaygroundViewModel::from_profiles_dir(&profiles);
+
+        assert_eq!(view_model.profiles()[0].name(), "default.toml");
+        assert!(view_model.profile_path().is_none());
+        assert!(view_model
+            .status_message()
+            .unwrap()
+            .contains("could not read firmware"));
+    }
+
+    #[test]
+    fn failed_selection_preserves_active_profile() {
+        let temporary = tempdir().unwrap();
+        let profiles = temporary.path().join("profiles");
+        fs::create_dir(&profiles).unwrap();
+        let active_path = profiles.join("active.toml");
+        let broken_path = profiles.join("broken.toml");
+        let profile = MachineProfile::default();
+        profile.save(&active_path).unwrap();
+        profile.save(&broken_path).unwrap();
+
+        let mut view_model = PlaygroundViewModel {
+            catalog: Some(ProfileCatalog::scan(&profiles).unwrap()),
+            profile_path: Some(active_path.clone()),
+            profile: Some(profile.clone()),
+            runtime: None,
+            status_message: None,
+        };
+
+        assert!(view_model.select_profile("broken.toml").is_err());
+        assert_eq!(view_model.profile_path(), Some(active_path.as_path()));
+        assert_eq!(view_model.profile(), Some(&profile));
     }
 }
