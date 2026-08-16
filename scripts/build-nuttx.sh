@@ -19,6 +19,26 @@ then
   exit 1
 fi
 
+if [ -n "${NUTTX_KCONFIG_BIN:-}" ]
+then
+  KCONFIG_TOOLS=$NUTTX_KCONFIG_BIN
+elif command -v kconfig-conf >/dev/null 2>&1 && \
+     command -v kconfig-tweak >/dev/null 2>&1
+then
+  KCONFIG_TOOLS=$(dirname -- "$(command -v kconfig-conf)")
+else
+  echo "NuttX requires kconfig-frontends; install it or set NUTTX_KCONFIG_BIN" >&2
+  exit 1
+fi
+
+for tool in kconfig-conf kconfig-tweak
+do
+  [ -x "$KCONFIG_TOOLS/$tool" ] || {
+    echo "NUTTX_KCONFIG_BIN is missing executable $tool: $KCONFIG_TOOLS" >&2
+    exit 1
+  }
+done
+
 SOURCE_CACHE="${TMPDIR:-/tmp}/compukter-playground-nuttx/sources"
 
 verify_revision()
@@ -33,6 +53,13 @@ verify_revision()
   if [ "$actual_revision" != "$expected_revision" ]
   then
     echo "$source_name source revision mismatch: expected $expected_revision, got $actual_revision" >&2
+    exit 1
+  fi
+  if ! git -C "$source_path" diff --quiet || \
+     ! git -C "$source_path" diff --cached --quiet || \
+     [ -n "$(git -C "$source_path" ls-files --others --exclude-standard)" ]
+  then
+    echo "$source_name source checkout is dirty: $source_path" >&2
     exit 1
   fi
 }
@@ -74,6 +101,30 @@ trap 'rm -rf "$BUILD_ROOT"' EXIT HUP INT TERM
 
 cp -a "$NUTTX_SOURCE/." "$BUILD_ROOT/nuttx"
 cp -a "$NUTTX_APPS_SOURCE/." "$BUILD_ROOT/apps"
+cp -a "$OVERLAY_ROOT/nuttx/." "$BUILD_ROOT/nuttx"
+cp -a "$OVERLAY_ROOT/apps/." "$BUILD_ROOT/apps"
 
-echo "Compukter NuttX overlay is not implemented yet" >&2
-exit 1
+if [ -f "$REPOSITORY/firmware/nuttx/patches/nuttx-kconfig.patch" ]
+then
+  git -C "$BUILD_ROOT/nuttx" apply --check \
+    "$REPOSITORY/firmware/nuttx/patches/nuttx-kconfig.patch"
+  git -C "$BUILD_ROOT/nuttx" apply \
+    "$REPOSITORY/firmware/nuttx/patches/nuttx-kconfig.patch"
+fi
+
+(cd "$BUILD_ROOT/nuttx" && PATH="$KCONFIG_TOOLS:$PATH" \
+  ./tools/configure.sh -a ../apps compukter-vm:nsh)
+
+for expected in \
+  'CONFIG_ARCH_CHIP_COMPUKTER=y' \
+  'CONFIG_ARCH_CHIP="compukter"' \
+  'CONFIG_ARCH_BOARD_COMPUKTER_VM=y' \
+  'CONFIG_ARCH_BOARD="compukter-vm"'
+do
+  grep -Fqx "$expected" "$BUILD_ROOT/nuttx/.config" || {
+    echo "generated NuttX configuration is missing: $expected" >&2
+    exit 1
+  }
+done
+
+echo "Compukter NuttX platform configuration generated successfully"

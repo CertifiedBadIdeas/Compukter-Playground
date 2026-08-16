@@ -1,0 +1,76 @@
+diff --git a/arch/risc-v/Kconfig b/arch/risc-v/Kconfig
+index 1c0c54b3..1113d0e4 100644
+--- a/arch/risc-v/Kconfig
++++ b/arch/risc-v/Kconfig
+@@ -299,6 +299,18 @@ config ARCH_CHIP_RV32M1
+ 	---help---
+ 		NXP RV32M1 processor (RISC-V Core with PULP extensions).
+ 
++config ARCH_CHIP_COMPUKTER
++	bool "Compukter VM"
++	select ARCH_RV32
++	select ARCH_RV_ISA_M
++	select ARCH_RV_ISA_A
++	select ONESHOT
++	select ONESHOT_COUNT
++	select ONESHOT_FAST_DIVISION
++	select ALARM_ARCH
++	---help---
++		Compukter deterministic RV32 virtual machine.
++
+ config ARCH_CHIP_QEMU_RV
+ 	bool "QEMU RV"
+ 	select ARCH_HAVE_FPU
+@@ -656,6 +668,7 @@ config ARCH_CHIP
+ 	default "c906"                  if ARCH_CHIP_C906
+ 	default "mpfs"                  if ARCH_CHIP_MPFS
+ 	default "rv32m1"                if ARCH_CHIP_RV32M1
++	default "compukter"             if ARCH_CHIP_COMPUKTER
+ 	default "qemu-rv"               if ARCH_CHIP_QEMU_RV
+ 	default "hpm6000"               if ARCH_CHIP_HPM6000
+ 	default "hpm6750"               if ARCH_CHIP_HPM6750
+@@ -908,6 +921,9 @@ endif
+ if ARCH_CHIP_RV32M1
+ source "arch/risc-v/src/rv32m1/Kconfig"
+ endif
++if ARCH_CHIP_COMPUKTER
++source "arch/risc-v/src/compukter/Kconfig"
++endif
+ if ARCH_CHIP_QEMU_RV
+ source "arch/risc-v/src/qemu-rv/Kconfig"
+ endif
+diff --git a/boards/Kconfig b/boards/Kconfig
+index 0eca78c8..38f4d9a4 100644
+--- a/boards/Kconfig
++++ b/boards/Kconfig
+@@ -2361,6 +2361,12 @@ config ARCH_BOARD_RV32M1_VEGA
+ 		This is the board configuration for the port of NuttX to the
+ 		RV32M1 VEGA board. This board features the RV32M1 RISC-V Core(s).
+ 
++config ARCH_BOARD_COMPUKTER_VM
++	bool "Compukter VM"
++	depends on ARCH_CHIP_COMPUKTER
++	---help---
++		Compukter deterministic RV32 virtual machine board.
++
+ config ARCH_BOARD_QEMU_RV_VIRT
+ 	bool "QEMU RV Virt"
+ 	depends on ARCH_CHIP_QEMU_RV
+@@ -3992,6 +3998,7 @@ config ARCH_BOARD
+ 	default "rtl8720f_evb"                 if ARCH_BOARD_RTL8720F_EVB
+ 	default "rtl8721f_evb"                 if ARCH_BOARD_RTL8721F_EVB
+ 	default "rv32m1-vega"                  if ARCH_BOARD_RV32M1_VEGA
++	default "compukter-vm"                 if ARCH_BOARD_COMPUKTER_VM
+ 	default "rv-virt"                      if ARCH_BOARD_QEMU_RV_VIRT
+ 	default "star64"                       if ARCH_BOARD_JH7110_STAR64
+ 	default "canmv230"                     if ARCH_BOARD_K230_CANMV
+@@ -5071,6 +5078,9 @@ endif
+ if ARCH_BOARD_RV32M1_VEGA
+ source "boards/risc-v/rv32m1/rv32m1-vega/Kconfig"
+ endif
++if ARCH_BOARD_COMPUKTER_VM
++source "boards/risc-v/compukter/compukter-vm/Kconfig"
++endif
+ if ARCH_BOARD_QEMU_RV_VIRT
+ source "boards/risc-v/qemu-rv/rv-virt/Kconfig"
+ endif

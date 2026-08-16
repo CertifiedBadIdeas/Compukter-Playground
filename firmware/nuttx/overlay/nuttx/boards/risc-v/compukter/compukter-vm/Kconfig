@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
+if ARCH_BOARD_COMPUKTER_VM
+
+endif

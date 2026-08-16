@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
+include common/Make.defs
+
+CHIP_ASRCS = compukter_head.S
+CHIP_CSRCS = compukter_start.c compukter_irq_dispatch.c compukter_irq.c
+CHIP_CSRCS += compukter_timerisr.c compukter_allocateheap.c

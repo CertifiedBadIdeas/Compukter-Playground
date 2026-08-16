@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
+if ARCH_CHIP_COMPUKTER
+
+comment "Compukter VM Options"
+
+endif
