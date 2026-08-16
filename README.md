@@ -33,6 +33,12 @@ Playground does not depend on the Minecraft mod.
 The egui/eframe window uses wgpu and the system X11 or Wayland stack. A working
 graphics driver is required; no global-hotkey or `xdotool` dependency is used.
 
+Building the NuttX firmware additionally requires Git, Make, LLVM/Clang with
+`ld.lld` and LLVM binutils, `riscv64-elf-gcc` for its RV32 `libgcc` multilib,
+and `kconfig-frontends` (`kconfig-conf` plus `kconfig-tweak`). If the Kconfig
+tools are installed outside `PATH`, set `NUTTX_KCONFIG_BIN` to their `bin`
+directory.
+
 ## Run
 
 Build the bundled RV32IM firmware first:
@@ -57,6 +63,35 @@ catalog through the toolbar selector. The firmware path is resolved relative
 to its profile, so each profile and its ELF can be moved together. See
 [`profiles/default.toml`](profiles/default.toml).
 
+## NuttX
+
+Build the pinned NuttX and nuttx-apps revisions into the ignored profile-local
+artifact:
+
+```sh
+./scripts/build-nuttx.sh profiles/nuttx.elf
+```
+
+The script uses shallow cached checkouts and always assembles a disposable
+source tree before applying the tracked Compukter overlay. For an offline build,
+`NUTTX_SOURCE` and `NUTTX_APPS_SOURCE` may point to clean checkouts at the exact
+revisions recorded in `firmware/nuttx/revisions.env`; supplied mismatched or
+dirty trees are rejected.
+
+Start the Playground, select `nuttx.toml`, and use its UART terminal. A working
+session looks like:
+
+```text
+NuttShell (NSH)
+nsh> hello
+Hello from NuttX on Compukter-VM
+nsh>
+```
+
+This first port is a flat RV32IMA/ILP32 firmware with NSH, the compact machine
+timer, PLIC source 1, and interrupt-driven 16550 UART. It intentionally does not
+enable an MMU, networking, block storage, or a loadable-program format yet.
+
 ## Verify
 
 Headless tests do not start a window:
@@ -66,6 +101,16 @@ cargo test --lib
 cargo test --test uart_firmware
 cargo check --all-targets
 ```
+
+The complete NuttX build-and-boot acceptance test is intentionally ignored in
+normal runs because it rebuilds both pinned upstream trees:
+
+```sh
+cargo test --release --test nuttx_firmware -- --ignored --nocapture
+```
+
+It waits for NSH, runs `hello`, then runs `help` in the same UART session while
+also checking WFI, timer, and PLIC liveness.
 
 The runtime tests execute real RV32 ELF bytes and exercise pause/step/reset as
 well as UART input through guest MMIO and output back into the terminal
