@@ -10,476 +10,351 @@
  */
 
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
-use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use eframe::egui::{self, Color32, RichText};
 
 use compukter_playground::profile::RuntimeMode;
-use compukter_playground::profile_catalog::ProfileEntry;
 use compukter_playground::runtime::{RuntimeCommand, RuntimeSnapshot};
 use compukter_playground::terminal::TerminalMode;
 use compukter_playground::view_model::PlaygroundViewModel;
 
-const BACKGROUND: Color = Color::rgba(0.035, 0.047, 0.067, 1.0);
-const PANEL: Color = Color::rgba(0.075, 0.094, 0.125, 1.0);
-const BORDER: Color = Color::rgba(0.18, 0.22, 0.29, 1.0);
-const TEXT: Color = Color::rgba(0.88, 0.91, 0.96, 1.0);
-const MUTED: Color = Color::rgba(0.55, 0.62, 0.72, 1.0);
-const BUTTON_BACKGROUND: Color = Color::rgba(0.090, 0.196, 0.302, 1.0);
-const BUTTON_BORDER: Color = Color::rgba(0.192, 0.341, 0.475, 1.0);
-const BUTTON_HOVER_BACKGROUND: Color = Color::rgba(0.137, 0.278, 0.400, 1.0);
-const BUTTON_HOVER_BORDER: Color = Color::rgba(0.255, 0.443, 0.608, 1.0);
+const REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+const BACKGROUND: Color32 = Color32::from_rgb(9, 12, 17);
+const PANEL: Color32 = Color32::from_rgb(19, 24, 32);
+const TERMINAL: Color32 = Color32::from_rgb(4, 5, 8);
+const BORDER: Color32 = Color32::from_rgb(46, 56, 74);
+const TEXT: Color32 = Color32::from_rgb(224, 232, 245);
+const MUTED: Color32 = Color32::from_rgb(140, 158, 184);
+const BUTTON: Color32 = Color32::from_rgb(23, 50, 77);
+const BUTTON_HOVER: Color32 = Color32::from_rgb(35, 71, 102);
 
-type SharedViewModel = Arc<Mutex<PlaygroundViewModel>>;
-
-pub fn run() -> Result<()> {
-    let view_model = Arc::new(Mutex::new(PlaygroundViewModel::from_profiles_dir(
-        "profiles",
-    )));
-    let uart_input = text_input_state_with_placeholder("UART input");
-    let poller_started = Arc::new(AtomicBool::new(false));
-    let poller_running = Arc::new(AtomicBool::new(true));
-    let config = WindowConfig {
-        title: "Compukter Playground".to_string(),
-        width: 1440,
-        height: 900,
-        min_size: Some((960, 640)),
-        ..WindowConfig::default()
+pub fn run() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([960.0, 640.0]),
+        ..eframe::NativeOptions::default()
     };
+    eframe::run_native(
+        "Compukter Playground",
+        options,
+        Box::new(|creation| Ok(Box::new(PlaygroundApp::new(creation)))),
+    )
+}
 
-    let running_for_ui = Arc::clone(&poller_running);
-    let result = WindowedApp::run(config, move |ctx| {
-        let refresh = ctx.use_state_keyed("runtime-refresh", || 0_u64);
-        let _ = refresh.get();
-        if !poller_started.swap(true, Ordering::SeqCst) {
-            let running = Arc::clone(&running_for_ui);
-            thread::spawn(move || {
-                while running.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(50));
-                    refresh.update_rebuild(|revision| revision.wrapping_add(1));
-                }
-            });
+#[derive(Debug, Default)]
+struct UartInputState {
+    text: String,
+}
+
+impl UartInputState {
+    fn take_submission(&mut self) -> Option<Vec<u8>> {
+        if self.text.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.text).into_bytes())
         }
-
-        workbench(ctx, &view_model, &uart_input)
-    });
-    poller_running.store(false, Ordering::SeqCst);
-    result
+    }
 }
 
-fn workbench(
-    ctx: &mut WindowedContext,
-    view_model: &SharedViewModel,
-    uart_input: &SharedTextInputState,
-) -> Div {
-    let snapshot = view_model.lock().unwrap().snapshot();
-
-    div()
-        .w(ctx.width)
-        .h(ctx.height)
-        .bg(BACKGROUND)
-        .flex_col()
-        .gap(2.0)
-        .p(3.0)
-        .child(toolbar(ctx, view_model, snapshot.as_deref()))
-        .child(
-            div()
-                .flex_row()
-                .flex_1()
-                .gap(3.0)
-                .overflow_clip()
-                .child(terminal_panel(
-                    ctx,
-                    view_model,
-                    uart_input,
-                    snapshot.as_deref(),
-                ))
-                .child(inspector_panel(snapshot.as_deref())),
-        )
-        .child(status_bar(view_model, snapshot.as_deref()))
+struct PlaygroundApp {
+    view_model: PlaygroundViewModel,
+    uart_input: UartInputState,
 }
 
-fn toolbar(
-    ctx: &WindowedContext,
-    view_model: &SharedViewModel,
-    snapshot: Option<&RuntimeSnapshot>,
-) -> Div {
-    let paused = snapshot.is_none_or(|snapshot| snapshot.paused);
-    let mode = snapshot.map(|snapshot| snapshot.mode);
-
-    div()
-        .w_full()
-        .flex_row()
-        .gap(2.0)
-        .items_center()
-        .child(text("Compukter Playground").size(20.0).color(TEXT))
-        .child(profile_selector(ctx, view_model))
-        .child(action_button(ctx, "save", "Save", {
-            let view_model = Arc::clone(view_model);
-            move || {
-                if let Err(error) = view_model.lock().unwrap().save_profile() {
-                    view_model.lock().unwrap().set_status_error(error);
-                }
-            }
-        }))
-        .child(action_button(
-            ctx,
-            "pause",
-            if paused { "Run" } else { "Pause" },
-            command_action(Arc::clone(view_model), RuntimeCommand::SetPaused(!paused)),
-        ))
-        .child(action_button(
-            ctx,
-            "step",
-            "Step",
-            command_action(Arc::clone(view_model), RuntimeCommand::Step),
-        ))
-        .child(action_button(
-            ctx,
-            "reset",
-            "Reset",
-            command_action(Arc::clone(view_model), RuntimeCommand::Reset),
-        ))
-        .child(action_button(
-            ctx,
-            "mode",
-            match mode {
-                Some(RuntimeMode::Unbounded) => "Unbounded",
-                _ => "Realtime 20 TPS",
-            },
-            command_action(
-                Arc::clone(view_model),
-                RuntimeCommand::SetMode(match mode {
-                    Some(RuntimeMode::Unbounded) => RuntimeMode::Realtime,
-                    _ => RuntimeMode::Unbounded,
-                }),
-            ),
-        ))
-}
-
-fn profile_selector(ctx: &WindowedContext, view_model: &SharedViewModel) -> Div {
-    let view_model_guard = view_model.lock().unwrap();
-    let active_name = view_model_guard
-        .profile_path()
-        .and_then(|path| path.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Select profile".to_string());
-    let entries = view_model_guard.profiles().to_vec();
-    drop(view_model_guard);
-
-    let hovered = ctx.use_state_keyed("profile-selector", || false);
-    let (background, border) = button_colors(hovered.get());
-    let selector = div()
-        .px(3.0)
-        .py(1.5)
-        .rounded(6.0)
-        .bg(background)
-        .border(1.0, border)
-        .items_center()
-        .justify_center()
-        .child(
-            text(format!("Profile: {active_name}"))
-                .size(12.0)
-                .color(TEXT)
-                .no_cursor(),
-        );
-
-    if entries.is_empty() {
-        return selector;
+impl PlaygroundApp {
+    fn new(creation: &eframe::CreationContext<'_>) -> Self {
+        configure_style(&creation.egui_ctx);
+        Self {
+            view_model: PlaygroundViewModel::from_profiles_dir("profiles"),
+            uart_input: UartInputState::default(),
+        }
     }
 
-    let overlay_manager = ctx.overlay_manager();
-    let view_model = Arc::clone(view_model);
-    selector
-        .cursor_pointer()
-        .on_hover_enter({
-            let hovered = hovered.clone();
-            move |_| hovered.set(true)
-        })
-        .on_hover_leave(move |_| hovered.set(false))
-        .on_click(move |event| {
-            let entries = entries.clone();
-            let view_model = Arc::clone(&view_model);
-            let manager_for_content = Arc::clone(&overlay_manager);
-            let width = event.bounds_width.max(180.0);
-            let height = entries.len() as f32 * 28.0 + 4.0;
-            overlay_manager
-                .dropdown()
-                .at(event.bounds_x, event.bounds_y + event.bounds_height)
-                .size(width, height)
-                .dismiss_on_escape(true)
-                .dismiss_on_click_outside(true)
-                .animation(OverlayAnimation::none())
-                .content(move || {
-                    profile_dropdown(
-                        &entries,
-                        Arc::clone(&view_model),
-                        Arc::clone(&manager_for_content),
-                        width,
-                    )
-                })
-                .show();
-        })
-}
-
-fn profile_dropdown(
-    entries: &[ProfileEntry],
-    view_model: SharedViewModel,
-    overlay_manager: OverlayManager,
-    width: f32,
-) -> Div {
-    let mut menu = div()
-        .w(width)
-        .flex_col()
-        .gap(1.0)
-        .p(1.0)
-        .rounded(6.0)
-        .bg(PANEL)
-        .border(1.0, BORDER);
-
-    for entry in entries {
-        let name = entry.name().to_owned();
-        let state_key = format!("profile-entry:{name}");
-        let view_model = Arc::clone(&view_model);
-        let overlay_manager = Arc::clone(&overlay_manager);
-        menu = menu.child(
-            Stateful::with_shared_state(use_shared_state::<ButtonState>(&state_key))
-                .w_full()
-                .h(27.0)
-                .px(3.0)
-                .items_center()
-                .rounded(5.0)
-                .cursor_pointer()
-                .child(text(name.clone()).size(12.0).color(TEXT).no_cursor())
-                .on_state(|state, item| {
-                    let hovered = matches!(state, ButtonState::Hovered | ButtonState::Pressed);
-                    let (background, border) = button_colors(hovered);
-                    *item = item.swap().bg(background).border(1.0, border);
-                })
-                .on_click(move |_| {
-                    let result = view_model.lock().unwrap().select_profile(&name);
-                    if let Err(error) = result {
-                        view_model.lock().unwrap().set_status_error(error);
-                    }
-                    overlay_manager.close_top();
-                }),
-        );
+    fn command(&mut self, command: RuntimeCommand) {
+        if let Err(error) = self.view_model.command(command) {
+            self.view_model.set_status_error(error);
+        }
     }
-    menu
-}
 
-fn terminal_panel(
-    ctx: &WindowedContext,
-    view_model: &SharedViewModel,
-    uart_input: &SharedTextInputState,
-    snapshot: Option<&RuntimeSnapshot>,
-) -> Div {
-    let terminal_mode = snapshot
-        .map(|snapshot| snapshot.terminal.mode)
-        .unwrap_or(TerminalMode::Ansi);
-    let output = snapshot
-        .map(|snapshot| match terminal_mode {
-            TerminalMode::Ansi => snapshot.terminal.ansi_text.clone(),
-            TerminalMode::Raw => format_raw(&snapshot.terminal.raw_bytes),
-        })
-        .unwrap_or_else(|| "Open a TOML machine profile to start the VM.".to_string());
-    let connected = snapshot.is_some_and(|snapshot| snapshot.uart_connected);
+    fn submit_uart(&mut self) {
+        if let Some(bytes) = self.uart_input.take_submission() {
+            self.command(RuntimeCommand::SendUart(bytes));
+        }
+    }
 
-    div()
-        .flex_col()
-        .flex_1()
-        .h_full()
-        .gap(2.0)
-        .p(2.0)
-        .bg(PANEL)
-        .border(1.0, BORDER)
-        .rounded(8.0)
-        .overflow_clip()
-        .child(
-            div()
-                .flex_row()
-                .gap(2.0)
-                .child(text("UART terminal").size(16.0).color(TEXT))
-                .child(action_button(
-                    ctx,
-                    "terminal-mode",
-                    match terminal_mode {
-                        TerminalMode::Ansi => "ANSI / VT100",
-                        TerminalMode::Raw => "Raw bytes",
-                    },
-                    command_action(
-                        Arc::clone(view_model),
-                        RuntimeCommand::SetTerminalMode(match terminal_mode {
-                            TerminalMode::Ansi => TerminalMode::Raw,
-                            TerminalMode::Raw => TerminalMode::Ansi,
-                        }),
-                    ),
-                ))
-                .child(action_button(
-                    ctx,
-                    "uart-connect",
-                    if connected { "Disconnect" } else { "Connect" },
-                    command_action(
-                        Arc::clone(view_model),
-                        RuntimeCommand::SetUartConnected(!connected),
-                    ),
-                ))
-                .child(action_button(
-                    ctx,
-                    "terminal-clear",
-                    "Clear",
-                    command_action(Arc::clone(view_model), RuntimeCommand::ClearTerminal),
-                )),
-        )
-        .child(
-            div()
-                .flex_1()
-                .w_full()
-                .p(2.0)
-                .bg(Color::rgba(0.015, 0.021, 0.031, 1.0))
-                .overflow_scroll()
-                .child(text(output).size(13.0).color(TEXT).monospace()),
-        )
-        .child(
-            div()
-                .w_full()
-                .flex_row()
-                .gap(2.0)
-                .child(text_input(uart_input).w_full().text_size(13.0))
-                .child(action_button(ctx, "uart-send", "Send", {
-                    let view_model = Arc::clone(view_model);
-                    let uart_input = Arc::clone(uart_input);
-                    move || {
-                        let bytes = {
-                            let mut input = uart_input.lock().unwrap();
-                            let bytes = input.value.as_bytes().to_vec();
-                            input.value.clear();
-                            input.cursor = 0;
-                            bytes
-                        };
-                        if !bytes.is_empty() {
-                            let mut view_model = view_model.lock().unwrap();
-                            if let Err(error) = view_model.command(RuntimeCommand::SendUart(bytes))
-                            {
-                                view_model.set_status_error(error);
-                            }
+    fn toolbar(&mut self, root: &mut egui::Ui, snapshot: Option<&RuntimeSnapshot>) {
+        egui::Panel::top("toolbar")
+            .frame(panel_frame().inner_margin(egui::Margin::symmetric(10, 7)))
+            .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new("Compukter Playground").color(TEXT));
+                    ui.separator();
+                    self.profile_selector(ui);
+
+                    if ui.button("Save").clicked() {
+                        if let Err(error) = self.view_model.save_profile() {
+                            self.view_model.set_status_error(error);
                         }
                     }
-                })),
-        )
-}
 
-fn inspector_panel(snapshot: Option<&RuntimeSnapshot>) -> Div {
-    let (registers, platform, stats) = snapshot.map_or_else(
-        || {
-            (
-                "No register state".to_string(),
-                "No platform state".to_string(),
-                "No runtime statistics".to_string(),
-            )
-        },
-        |snapshot| {
-            (
-                format_registers(snapshot),
-                format_platform(snapshot),
-                format_statistics(snapshot),
-            )
-        },
-    );
+                    let paused = snapshot.is_none_or(|snapshot| snapshot.paused);
+                    if ui.button(if paused { "Run" } else { "Pause" }).clicked() {
+                        self.command(RuntimeCommand::SetPaused(!paused));
+                    }
+                    if ui.button("Step").clicked() {
+                        self.command(RuntimeCommand::Step);
+                    }
+                    if ui.button("Reset").clicked() {
+                        self.command(RuntimeCommand::Reset);
+                    }
 
-    div()
-        .w(440.0)
-        .h_full()
-        .flex_col()
-        .gap(2.0)
-        .overflow_scroll()
-        .child(info_card("Registers", registers))
-        .child(info_card("CSR / timer / PLIC", platform))
-        .child(info_card("Execution", stats))
-}
-
-fn info_card(title: &str, contents: String) -> Div {
-    div()
-        .w_full()
-        .flex_col()
-        .gap(1.0)
-        .p(2.0)
-        .bg(PANEL)
-        .border(1.0, BORDER)
-        .rounded(8.0)
-        .child(text(title).size(15.0).color(TEXT))
-        .child(text(contents).size(12.0).color(MUTED).monospace())
-}
-
-fn status_bar(view_model: &SharedViewModel, snapshot: Option<&RuntimeSnapshot>) -> Div {
-    let view_model = view_model.lock().unwrap();
-    let status = snapshot.map_or_else(
-        || "Stopped".to_string(),
-        |snapshot| {
-            format!(
-                "{:?} | {:?} | revision {}",
-                snapshot.outcome, snapshot.mode, snapshot.revision
-            )
-        },
-    );
-    let message = snapshot
-        .and_then(|snapshot| snapshot.error.as_deref())
-        .or_else(|| view_model.status_message())
-        .unwrap_or("");
-    div()
-        .w_full()
-        .flex_row()
-        .gap(3.0)
-        .child(text(status).size(12.0).color(MUTED))
-        .child(text(message).size(12.0).color(TEXT))
-}
-
-fn action_button(
-    ctx: &WindowedContext,
-    key: &'static str,
-    label: impl Into<String>,
-    action: impl Fn() + Send + Sync + 'static,
-) -> Div {
-    let hovered = ctx.use_state_keyed(key, || false);
-    let (background, border) = button_colors(hovered.get());
-
-    div()
-        .px(3.0)
-        .py(1.5)
-        .rounded(6.0)
-        .bg(background)
-        .border(1.0, border)
-        .cursor_pointer()
-        .items_center()
-        .justify_center()
-        .child(text(label).size(12.0).color(TEXT).no_cursor())
-        .on_hover_enter({
-            let hovered = hovered.clone();
-            move |_| hovered.set(true)
-        })
-        .on_hover_leave(move |_| hovered.set(false))
-        .on_click(move |_| action())
-}
-
-fn button_colors(hovered: bool) -> (Color, Color) {
-    if hovered {
-        (BUTTON_HOVER_BACKGROUND, BUTTON_HOVER_BORDER)
-    } else {
-        (BUTTON_BACKGROUND, BUTTON_BORDER)
+                    let mode = snapshot.map(|snapshot| snapshot.mode);
+                    let mode_label = match mode {
+                        Some(RuntimeMode::Unbounded) => "Unbounded",
+                        _ => "Realtime 20 TPS",
+                    };
+                    if ui.button(mode_label).clicked() {
+                        let next = match mode {
+                            Some(RuntimeMode::Unbounded) => RuntimeMode::Realtime,
+                            _ => RuntimeMode::Unbounded,
+                        };
+                        self.command(RuntimeCommand::SetMode(next));
+                    }
+                });
+            });
     }
-}
 
-fn command_action(view_model: SharedViewModel, command: RuntimeCommand) -> impl Fn() + Send + Sync {
-    move || {
-        let mut view_model = view_model.lock().unwrap();
-        if let Err(error) = view_model.command(command.clone()) {
-            view_model.set_status_error(error);
+    fn profile_selector(&mut self, ui: &mut egui::Ui) {
+        let active = self
+            .view_model
+            .profile_path()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Select profile".to_string());
+        let profiles: Vec<String> = self
+            .view_model
+            .profiles()
+            .iter()
+            .map(|entry| entry.name().to_owned())
+            .collect();
+        let mut selected = None;
+
+        egui::ComboBox::from_id_salt("profile-selector")
+            .selected_text(format!("Profile: {active}"))
+            .show_ui(ui, |ui| {
+                for profile in profiles {
+                    if ui.selectable_label(profile == active, &profile).clicked() {
+                        selected = Some(profile);
+                    }
+                }
+            });
+
+        if let Some(profile) = selected {
+            if profile != active {
+                if let Err(error) = self.view_model.select_profile(&profile) {
+                    self.view_model.set_status_error(error);
+                }
+            }
         }
     }
+
+    fn inspector(&self, root: &mut egui::Ui, snapshot: Option<&RuntimeSnapshot>) {
+        egui::Panel::right("inspector")
+            .default_size(440.0)
+            .min_size(320.0)
+            .resizable(true)
+            .frame(panel_frame().inner_margin(egui::Margin::same(8)))
+            .show(root, |ui| {
+                let (registers, platform, stats) = snapshot.map_or_else(
+                    || {
+                        (
+                            "No register state".to_string(),
+                            "No platform state".to_string(),
+                            "No runtime statistics".to_string(),
+                        )
+                    },
+                    |snapshot| {
+                        (
+                            format_registers(snapshot),
+                            format_platform(snapshot),
+                            format_statistics(snapshot),
+                        )
+                    },
+                );
+                info_card(ui, "Registers", &registers);
+                ui.add_space(6.0);
+                info_card(ui, "CSR / timer / PLIC", &platform);
+                ui.add_space(6.0);
+                info_card(ui, "Execution", &stats);
+            });
+    }
+
+    fn terminal(&mut self, root: &mut egui::Ui, snapshot: Option<&RuntimeSnapshot>) {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(BACKGROUND)
+                    .inner_margin(egui::Margin::same(8)),
+            )
+            .show(root, |ui| {
+                let terminal_mode = snapshot
+                    .map(|snapshot| snapshot.terminal.mode)
+                    .unwrap_or(TerminalMode::Ansi);
+                let connected = snapshot.is_some_and(|snapshot| snapshot.uart_connected);
+
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new("UART terminal").color(TEXT));
+                    let terminal_label = match terminal_mode {
+                        TerminalMode::Ansi => "ANSI / VT100",
+                        TerminalMode::Raw => "Raw bytes",
+                    };
+                    if ui.button(terminal_label).clicked() {
+                        let next = match terminal_mode {
+                            TerminalMode::Ansi => TerminalMode::Raw,
+                            TerminalMode::Raw => TerminalMode::Ansi,
+                        };
+                        self.command(RuntimeCommand::SetTerminalMode(next));
+                    }
+                    if ui
+                        .button(if connected { "Disconnect" } else { "Connect" })
+                        .clicked()
+                    {
+                        self.command(RuntimeCommand::SetUartConnected(!connected));
+                    }
+                    if ui.button("Clear").clicked() {
+                        self.command(RuntimeCommand::ClearTerminal);
+                    }
+                });
+                ui.add_space(4.0);
+
+                let output = snapshot.map_or_else(
+                    || "Open a TOML machine profile to start the VM.".to_string(),
+                    |snapshot| match terminal_mode {
+                        TerminalMode::Ansi => snapshot.terminal.ansi_text.clone(),
+                        TerminalMode::Raw => format_raw(&snapshot.terminal.raw_bytes),
+                    },
+                );
+                let input_height = 34.0;
+                egui::Frame::new()
+                    .fill(TERMINAL)
+                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(true)
+                            .max_height((ui.available_height() - input_height).max(80.0))
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(output).monospace().color(TEXT))
+                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                );
+                            });
+                    });
+                ui.add_space(6.0);
+
+                let mut submit = false;
+                ui.horizontal(|ui| {
+                    let width = (ui.available_width() - 64.0).max(120.0);
+                    let response = ui.add_sized(
+                        [width, 28.0],
+                        egui::TextEdit::singleline(&mut self.uart_input.text)
+                            .hint_text("UART input")
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    submit |= response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    submit |= ui
+                        .add_sized([58.0, 28.0], egui::Button::new("Send"))
+                        .clicked();
+                });
+                if submit {
+                    self.submit_uart();
+                }
+            });
+    }
+
+    fn status_bar(&self, root: &mut egui::Ui, snapshot: Option<&RuntimeSnapshot>) {
+        egui::Panel::bottom("status")
+            .frame(panel_frame().inner_margin(egui::Margin::symmetric(10, 5)))
+            .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    let status = snapshot.map_or_else(
+                        || "Stopped".to_string(),
+                        |snapshot| {
+                            format!(
+                                "{:?} | {:?} | revision {}",
+                                snapshot.outcome, snapshot.mode, snapshot.revision
+                            )
+                        },
+                    );
+                    ui.label(RichText::new(status).color(MUTED));
+                    let message = snapshot
+                        .and_then(|snapshot| snapshot.error.as_deref())
+                        .or_else(|| self.view_model.status_message())
+                        .unwrap_or("");
+                    ui.label(RichText::new(message).color(TEXT));
+                });
+            });
+    }
+}
+
+impl eframe::App for PlaygroundApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.ctx().request_repaint_after(REFRESH_INTERVAL);
+        let snapshot = self.view_model.snapshot();
+        self.toolbar(ui, snapshot.as_deref());
+        self.status_bar(ui, snapshot.as_deref());
+        self.inspector(ui, snapshot.as_deref());
+        self.terminal(ui, snapshot.as_deref());
+    }
+}
+
+fn configure_style(context: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = PANEL;
+    visuals.window_fill = PANEL;
+    visuals.extreme_bg_color = TERMINAL;
+    visuals.faint_bg_color = BACKGROUND;
+    visuals.widgets.inactive.bg_fill = BUTTON;
+    visuals.widgets.inactive.weak_bg_fill = BUTTON;
+    visuals.widgets.hovered.bg_fill = BUTTON_HOVER;
+    visuals.widgets.active.bg_fill = BUTTON_HOVER;
+    visuals.widgets.inactive.fg_stroke.color = TEXT;
+    visuals.widgets.hovered.fg_stroke.color = TEXT;
+    visuals.widgets.active.fg_stroke.color = TEXT;
+    visuals.widgets.noninteractive.fg_stroke.color = TEXT;
+    context.set_visuals(visuals);
+
+    context.style_mut_of(egui::Theme::Dark, |style| {
+        style.spacing.item_spacing = egui::vec2(6.0, 6.0);
+        style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    });
+}
+
+fn panel_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(PANEL)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+}
+
+fn info_card(ui: &mut egui::Ui, title: &str, contents: &str) {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(28, 35, 47))
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.label(RichText::new(title).size(15.0).color(TEXT));
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(RichText::new(contents).monospace().color(MUTED))
+                    .wrap_mode(egui::TextWrapMode::Extend),
+            );
+        });
 }
 
 fn format_raw(bytes: &[u8]) -> String {
@@ -567,17 +442,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn button_colors_become_lighter_when_hovered() {
-        let (idle_background, idle_border) = button_colors(false);
-        let (hover_background, hover_border) = button_colors(true);
+    fn uart_input_remains_visible_until_non_empty_submission() {
+        let mut input = UartInputState::default();
+        input.text.push_str("Echo me!");
 
-        assert_eq!(idle_background, BUTTON_BACKGROUND);
-        assert_eq!(idle_border, BUTTON_BORDER);
-        assert!(hover_background.r > idle_background.r);
-        assert!(hover_background.g > idle_background.g);
-        assert!(hover_background.b > idle_background.b);
-        assert!(hover_border.r > idle_border.r);
-        assert!(hover_border.g > idle_border.g);
-        assert!(hover_border.b > idle_border.b);
+        assert_eq!(input.text, "Echo me!");
+        assert_eq!(input.take_submission(), Some(b"Echo me!".to_vec()));
+        assert!(input.text.is_empty());
+        assert_eq!(input.take_submission(), None);
     }
 }

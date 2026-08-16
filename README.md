@@ -6,7 +6,7 @@ starting Minecraft.
 
 The first slice provides:
 
-- a Blinc desktop GUI;
+- an egui/eframe desktop GUI;
 - versioned TOML machine profiles with profile-relative ELF paths;
 - a dedicated OS thread that exclusively owns the VM;
 - realtime 20 TPS and unbounded execution modes;
@@ -30,16 +30,8 @@ Playground does not depend on the Minecraft mod.
 
 ## Linux dependencies
 
-Blinc 0.5.1 enables its complete desktop feature set, including global
-hotkeys. On Arch Linux the extra link dependency is provided by:
-
-```sh
-sudo pacman -S --needed xdotool
-```
-
-The usual Blinc graphics/window dependencies (Vulkan or another wgpu backend,
-X11/Wayland, GTK 3, ALSA, and libappindicator) must also be available. A
-missing `-lxdo` linker error specifically means `xdotool` is absent.
+The egui/eframe window uses wgpu and the system X11 or Wayland stack. A working
+graphics driver is required; no global-hotkey or `xdotool` dependency is used.
 
 ## Run
 
@@ -81,7 +73,7 @@ snapshot.
 
 ## Runtime model
 
-The Blinc/UI thread never owns or executes `Rv32Machine`. Commands cross a
+The egui/UI thread never owns or executes `Rv32Machine`. Commands cross a
 bounded channel to `compukter-vm`, a dedicated OS thread. Inspection is copied
 into a capacity-one latest-wins mailbox, so a slow GUI cannot create an
 unbounded snapshot queue. UART history is bounded separately and therefore

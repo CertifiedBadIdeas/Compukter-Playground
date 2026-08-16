@@ -12,7 +12,7 @@ bench = false
 [dependencies]
 compukter-vm = { path = "../Compukter-VM" }
 compukter-vm-devices = { path = "../Compukter-VM/crates/compukter-vm-devices" }
-blinc_app = "0.5.1"
+eframe = "0.35"
 crossbeam-channel = "0.5"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
