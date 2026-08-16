@@ -30,6 +30,8 @@ const TEXT: Color = Color::rgba(0.88, 0.91, 0.96, 1.0);
 const MUTED: Color = Color::rgba(0.55, 0.62, 0.72, 1.0);
 const BUTTON_BACKGROUND: Color = Color::rgba(0.090, 0.196, 0.302, 1.0);
 const BUTTON_BORDER: Color = Color::rgba(0.192, 0.341, 0.475, 1.0);
+const BUTTON_HOVER_BACKGROUND: Color = Color::rgba(0.137, 0.278, 0.400, 1.0);
+const BUTTON_HOVER_BORDER: Color = Color::rgba(0.255, 0.443, 0.608, 1.0);
 
 type SharedViewModel = Arc<Mutex<PlaygroundViewModel>>;
 
@@ -343,22 +345,38 @@ fn status_bar(view_model: &SharedViewModel, snapshot: Option<&RuntimeSnapshot>) 
 }
 
 fn action_button(
-    _ctx: &WindowedContext,
-    _key: &'static str,
+    ctx: &WindowedContext,
+    key: &'static str,
     label: impl Into<String>,
     action: impl Fn() + Send + Sync + 'static,
 ) -> Div {
+    let hovered = ctx.use_state_keyed(key, || false);
+    let (background, border) = button_colors(hovered.get());
+
     div()
         .px(3.0)
         .py(1.5)
         .rounded(6.0)
-        .bg(BUTTON_BACKGROUND)
-        .border(1.0, BUTTON_BORDER)
+        .bg(background)
+        .border(1.0, border)
         .cursor_pointer()
         .items_center()
         .justify_center()
-        .child(text(label).size(12.0).color(TEXT))
+        .child(text(label).size(12.0).color(TEXT).no_cursor())
+        .on_hover_enter({
+            let hovered = hovered.clone();
+            move |_| hovered.set(true)
+        })
+        .on_hover_leave(move |_| hovered.set(false))
         .on_click(move |_| action())
+}
+
+fn button_colors(hovered: bool) -> (Color, Color) {
+    if hovered {
+        (BUTTON_HOVER_BACKGROUND, BUTTON_HOVER_BORDER)
+    } else {
+        (BUTTON_BACKGROUND, BUTTON_BORDER)
+    }
 }
 
 fn command_action(view_model: SharedViewModel, command: RuntimeCommand) -> impl Fn() + Send + Sync {
@@ -448,4 +466,24 @@ fn format_statistics(snapshot: &RuntimeSnapshot) -> String {
         snapshot.inspection.translation_stats,
         snapshot.inspection.dbt_stats,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn button_colors_become_lighter_when_hovered() {
+        let (idle_background, idle_border) = button_colors(false);
+        let (hover_background, hover_border) = button_colors(true);
+
+        assert_eq!(idle_background, BUTTON_BACKGROUND);
+        assert_eq!(idle_border, BUTTON_BORDER);
+        assert!(hover_background.r > idle_background.r);
+        assert!(hover_background.g > idle_background.g);
+        assert!(hover_background.b > idle_background.b);
+        assert!(hover_border.r > idle_border.r);
+        assert!(hover_border.g > idle_border.g);
+        assert!(hover_border.b > idle_border.b);
+    }
 }
