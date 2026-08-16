@@ -9,7 +9,8 @@ case "${1:-profiles/nuttx.elf}" in
   *) OUTPUT_ELF="$REPOSITORY/${1:-profiles/nuttx.elf}" ;;
 esac
 
-for tool in git make clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-readelf
+for tool in git make clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-readelf \
+  riscv64-elf-gcc
 do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required NuttX build tool is unavailable: $tool" >&2
