@@ -60,6 +60,10 @@ impl UartInputState {
     }
 }
 
+fn uart_submit_requested(input_has_focus: bool, enter_pressed: bool, send_clicked: bool) -> bool {
+    send_clicked || (input_has_focus && enter_pressed)
+}
+
 struct PlaygroundApp {
     view_model: PlaygroundViewModel,
     uart_input: UartInputState,
@@ -272,11 +276,12 @@ impl PlaygroundApp {
                     if snapshot.is_some() {
                         response.request_focus();
                     }
-                    submit |= response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    submit |= ui
+                    let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let send_clicked = ui
                         .add_sized([58.0, 28.0], egui::Button::new("Send"))
                         .clicked();
+                    submit |=
+                        uart_submit_requested(response.has_focus(), enter_pressed, send_clicked);
                 });
                 if submit {
                     self.submit_uart();
@@ -457,5 +462,13 @@ mod tests {
         assert_eq!(input.take_submission(), Some(b"Echo me!\n".to_vec()));
         assert!(input.text.is_empty());
         assert_eq!(input.take_submission(), None);
+    }
+
+    #[test]
+    fn focused_uart_input_submits_on_enter_without_losing_focus() {
+        assert!(uart_submit_requested(true, true, false));
+        assert!(!uart_submit_requested(true, false, false));
+        assert!(!uart_submit_requested(false, true, false));
+        assert!(uart_submit_requested(false, false, true));
     }
 }
