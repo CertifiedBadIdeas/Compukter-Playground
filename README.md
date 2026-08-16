@@ -1,0 +1,78 @@
+# Compukter Playground
+
+Desktop engineering workbench for running and inspecting
+[Compukter-VM](https://github.com/CertifiedBadIdeas/Compukter-VM) machines without
+starting Minecraft.
+
+The first slice provides:
+
+- a Blinc desktop GUI;
+- versioned TOML machine profiles with profile-relative ELF paths;
+- a dedicated OS thread that exclusively owns the VM;
+- realtime 20 TPS and unbounded execution modes;
+- pause, single-instruction step, reset, and latest-wins inspection snapshots;
+- a 16550-style UART with connect/disconnect and host input;
+- ANSI/VT100 and bounded raw-byte terminal views;
+- RV32 registers, CSR, timer, PLIC, translation, DBT, and UART diagnostics.
+
+## Repository layout
+
+During development, clone this repository beside `Compukter-VM`:
+
+```text
+parent/
+├── Compukter-VM/
+└── Compukter-Playground/
+```
+
+The path dependencies in `Cargo.toml` deliberately use that layout. The
+Playground does not depend on the Minecraft mod.
+
+## Linux dependencies
+
+Blinc 0.5.1 enables its complete desktop feature set, including global
+hotkeys. On Arch Linux the extra link dependency is provided by:
+
+```sh
+sudo pacman -S --needed xdotool
+```
+
+The usual Blinc graphics/window dependencies (Vulkan or another wgpu backend,
+X11/Wayland, GTK 3, ALSA, and libappindicator) must also be available. A
+missing `-lxdo` linker error specifically means `xdotool` is absent.
+
+## Run
+
+```sh
+cargo run --release
+```
+
+Open a TOML profile from the toolbar. The firmware path is resolved relative
+to that profile, so a profile and its ELF can be moved together. See
+[`profiles/default.toml`](profiles/default.toml).
+
+## Verify
+
+Headless tests do not start a window:
+
+```sh
+cargo test --lib
+cargo check --all-targets
+```
+
+The runtime tests execute real RV32 ELF bytes and exercise pause/step/reset as
+well as UART input through guest MMIO and output back into the terminal
+snapshot.
+
+## Runtime model
+
+The Blinc/UI thread never owns or executes `Rv32Machine`. Commands cross a
+bounded channel to `compukter-vm`, a dedicated OS thread. Inspection is copied
+into a capacity-one latest-wins mailbox, so a slow GUI cannot create an
+unbounded snapshot queue. UART history is bounded separately and therefore
+does not disappear when intermediate inspection snapshots are replaced.
+
+Realtime mode advances one configured virtual timer quantum and grants one
+instruction budget every 50 ms. Unbounded mode grants the same deterministic
+quantum repeatedly without wall-clock pacing. Single-step retires at most one
+instruction and does not advance virtual time.

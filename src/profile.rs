@@ -403,4 +403,11 @@ mod tests {
             Err(ProfileError::AbsoluteFirmwarePath(_))
         ));
     }
+
+    #[test]
+    fn checked_in_default_profile_matches_the_schema() {
+        let profile = MachineProfile::from_toml(include_str!("../profiles/default.toml")).unwrap();
+
+        assert_eq!(profile, MachineProfile::default());
+    }
 }
