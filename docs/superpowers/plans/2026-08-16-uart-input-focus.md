@@ -29,7 +29,7 @@ empty submission returns `None`.
 
 - [ ] **Step 2: Run the focused test and observe the expected failure**
 
-Run: `cargo test ui::tests::uart_input_remains_visible_until_non_empty_submission -- --exact`
+Run: `cargo test --bin compukter-playground ui::tests::uart_input_submission_appends_newline_and_clears_text -- --exact`
 
 Expected: FAIL because the current value is `Echo me!` without the trailing byte
 `0x0a`.
@@ -47,7 +47,7 @@ Some(line.into_bytes())
 
 - [ ] **Step 4: Run the focused test and observe it pass**
 
-Run: `cargo test ui::tests::uart_input_remains_visible_until_non_empty_submission -- --exact`
+Run: `cargo test --bin compukter-playground ui::tests::uart_input_submission_appends_newline_and_clears_text -- --exact`
 
 Expected: PASS.
 
@@ -74,6 +74,7 @@ Run:
 ```bash
 cargo fmt --check
 cargo test --all-targets
+cargo test --bin compukter-playground
 cargo clippy --all-targets -- -D warnings
 git diff --check
 ```

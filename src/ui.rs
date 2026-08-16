@@ -53,7 +53,9 @@ impl UartInputState {
         if self.text.is_empty() {
             None
         } else {
-            Some(std::mem::take(&mut self.text).into_bytes())
+            let mut line = std::mem::take(&mut self.text);
+            line.push('\n');
+            Some(line.into_bytes())
         }
     }
 }
@@ -259,12 +261,17 @@ impl PlaygroundApp {
                 let mut submit = false;
                 ui.horizontal(|ui| {
                     let width = (ui.available_width() - 64.0).max(120.0);
+                    let input_id = ui.make_persistent_id("uart-input");
                     let response = ui.add_sized(
                         [width, 28.0],
                         egui::TextEdit::singleline(&mut self.uart_input.text)
+                            .id(input_id)
                             .hint_text("UART input")
                             .font(egui::TextStyle::Monospace),
                     );
+                    if snapshot.is_some() {
+                        response.request_focus();
+                    }
                     submit |= response.lost_focus()
                         && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     submit |= ui
@@ -442,12 +449,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uart_input_remains_visible_until_non_empty_submission() {
+    fn uart_input_submission_appends_newline_and_clears_text() {
         let mut input = UartInputState::default();
         input.text.push_str("Echo me!");
 
         assert_eq!(input.text, "Echo me!");
-        assert_eq!(input.take_submission(), Some(b"Echo me!".to_vec()));
+        assert_eq!(input.take_submission(), Some(b"Echo me!\n".to_vec()));
         assert!(input.text.is_empty());
         assert_eq!(input.take_submission(), None);
     }
