@@ -5,3 +5,7 @@
 void board_early_initialize(void)
 {
 }
+
+void board_late_initialize(void)
+{
+}

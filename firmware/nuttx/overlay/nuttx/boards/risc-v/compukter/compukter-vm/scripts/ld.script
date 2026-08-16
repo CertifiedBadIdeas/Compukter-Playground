@@ -1,0 +1,91 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+#include <nuttx/config.h>
+
+OUTPUT_ARCH(riscv)
+ENTRY(__start)
+
+PHDRS
+{
+  text PT_LOAD FLAGS(5);
+  data PT_LOAD FLAGS(6);
+}
+
+SECTIONS
+{
+  . = CONFIG_RAM_START;
+
+  .text :
+  {
+    _stext = .;
+    KEEP(*(.text.__start))
+    *(.text .text.*)
+    *(.gnu.warning)
+    *(.stub)
+    *(.init)
+    *(.fini)
+    _etext = .;
+  } :text
+
+  .init_section :
+  {
+    _sinit = ABSOLUTE(.);
+    KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
+    KEEP(*(.init_array .ctors))
+    _einit = ABSOLUTE(.);
+  } :text
+
+  .rodata :
+  {
+    _srodata = .;
+    *(.rodata .rodata.* .srodata .srodata.*)
+    *(.gnu.linkonce.r*)
+    *(.eh_frame*)
+    _erodata = .;
+  } :text
+
+  .tdata :
+  {
+    _stdata = ABSOLUTE(.);
+    *(.tdata .tdata.* .gnu.linkonce.td.*)
+    _etdata = ABSOLUTE(.);
+  } :text
+
+  .tbss :
+  {
+    _stbss = ABSOLUTE(.);
+    *(.tbss .tbss.* .gnu.linkonce.tb.* .tcommon)
+    _etbss = ABSOLUTE(.);
+  } :text
+
+  _eronly = ABSOLUTE(.);
+  . = ALIGN(0x1000);
+
+  .data :
+  {
+    _sdata = .;
+    *(.data .data.* .sdata .sdata.*)
+    *(.gnu.linkonce.d*)
+    *(.got .got.*)
+    . = ALIGN(4);
+    _edata = .;
+  } :data
+
+  .bss (NOLOAD) :
+  {
+    _sbss = .;
+    *(.bss .bss.* .sbss .sbss.*)
+    *(.gnu.linkonce.b*)
+    *(COMMON)
+    . = ALIGN(32);
+    _ebss = .;
+  } :data
+
+  __image_end = .;
+
+  .riscv.attributes 0 : { *(.riscv.attributes) }
+  .comment 0 : { *(.comment) }
+  .debug 0 : { *(.debug*) }
+
+  ASSERT(__image_end <= CONFIG_RAM_END, "NuttX image exceeds Compukter RAM")
+}

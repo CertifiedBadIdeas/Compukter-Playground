@@ -4,6 +4,11 @@ set -eu
 REPOSITORY=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$REPOSITORY/firmware/nuttx/revisions.env"
 
+case "${1:-profiles/nuttx.elf}" in
+  /*) OUTPUT_ELF=${1:-profiles/nuttx.elf} ;;
+  *) OUTPUT_ELF="$REPOSITORY/${1:-profiles/nuttx.elf}" ;;
+esac
+
 for tool in git make clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-readelf
 do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -127,4 +132,48 @@ do
   }
 done
 
-echo "Compukter NuttX platform configuration generated successfully"
+(cd "$BUILD_ROOT/nuttx" && PATH="$KCONFIG_TOOLS:$PATH" \
+  make -j"${NUTTX_JOBS:-2}")
+
+mkdir -p "$(dirname -- "$OUTPUT_ELF")"
+cp "$BUILD_ROOT/nuttx/nuttx" "$OUTPUT_ELF"
+
+elf_header=$(llvm-readelf -h "$OUTPUT_ELF")
+echo "$elf_header" | grep -Fq 'Class:                             ELF32' || {
+  echo "NuttX firmware is not ELF32" >&2
+  exit 1
+}
+echo "$elf_header" | grep -Fq "Data:                              2's complement, little endian" || {
+  echo "NuttX firmware is not little-endian" >&2
+  exit 1
+}
+echo "$elf_header" | grep -Fq 'Machine:                           RISC-V' || {
+  echo "NuttX firmware is not RISC-V" >&2
+  exit 1
+}
+echo "$elf_header" | grep -Eq 'Entry point address:[[:space:]]+0x1000$' || {
+  echo "NuttX firmware entry point is not 0x1000" >&2
+  exit 1
+}
+
+program_headers=$(llvm-readelf -l "$OUTPUT_ELF")
+if echo "$program_headers" | grep -E 'LOAD.*W.*E' >/dev/null
+then
+  echo "NuttX firmware contains a writable-executable PT_LOAD" >&2
+  exit 1
+fi
+
+attributes=$(llvm-readelf -A "$OUTPUT_ELF")
+if echo "$attributes" | grep -E 'Tag_RISCV_arch:.*rv32[^\"]*(_c|c[0-9])' >/dev/null
+then
+  echo "NuttX firmware unexpectedly requires compressed instructions" >&2
+  exit 1
+fi
+
+if llvm-nm -u "$OUTPUT_ELF" | grep -E '[[:space:]]U[[:space:]]' >/dev/null
+then
+  echo "NuttX firmware contains strong unresolved symbols" >&2
+  exit 1
+fi
+
+echo "Built Compukter NuttX firmware: $OUTPUT_ELF"
