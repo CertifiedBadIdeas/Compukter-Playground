@@ -42,8 +42,8 @@ Build the bundled RV32IM firmware first:
 ```
 
 This creates the ignored local artifact `profiles/firmware.elf`. The firmware
-prints `Compukter Playground UART ready`, configures UART receive interrupts
-through the PLIC, sleeps with `WFI` while idle, and echoes terminal input.
+prints `Compukter Playground UART ready`, drives UART RX and buffered TX through
+PLIC interrupts, sleeps with `WFI` while idle, and echoes terminal input.
 
 Then start the workbench:
 

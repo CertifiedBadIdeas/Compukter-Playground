@@ -27,6 +27,7 @@ fn firmware_prints_banner_sleeps_and_echoes_uart_input() {
         initial_mode: RuntimeMode::Unbounded,
         ..MachineProfile::default()
     };
+    let instruction_budget = profile.clock.instructions_per_tick;
     let runtime = RuntimeHandle::spawn(profile, elf).unwrap();
 
     let idle = runtime.wait_for(
@@ -37,6 +38,11 @@ fn firmware_prints_banner_sleeps_and_echoes_uart_input() {
         Duration::from_secs(2),
     );
     assert!(idle.error.is_none());
+    assert!(
+        idle.inspection.hart.retired_instructions < instruction_budget,
+        "interrupt-driven banner transmission retired {} instructions, one quantum is {instruction_budget}",
+        idle.inspection.hart.retired_instructions
+    );
 
     let input = b"Echo me!\r\n";
     runtime
