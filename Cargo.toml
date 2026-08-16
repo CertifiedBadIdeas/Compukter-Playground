@@ -3,5 +3,19 @@ name = "compukter-playground"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "compukter-playground"
+path = "src/main.rs"
+test = false
+bench = false
+
 [dependencies]
 compukter-vm = { path = "../Compukter-VM" }
+compukter-vm-devices = { path = "../Compukter-VM/crates/compukter-vm-devices" }
+blinc_app = "0.5.1"
+crossbeam-channel = "0.5"
+rfd = "0.17.2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.9"
+vt100 = "0.16.2"
