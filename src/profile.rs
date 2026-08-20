@@ -441,20 +441,19 @@ mod tests {
 
     #[test]
     fn schema_one_profile_accepts_an_optional_relative_disk() {
-        let mut profile = MachineProfile::default();
-        profile.disk = Some(DiskProfile {
-            image: PathBuf::from("rootfs.img"),
-            read_only: true,
-        });
+        let profile = MachineProfile {
+            disk: Some(DiskProfile {
+                image: PathBuf::from("rootfs.img"),
+                read_only: true,
+            }),
+            ..MachineProfile::default()
+        };
 
         let encoded = profile.to_toml().unwrap();
         let decoded = MachineProfile::from_toml(&encoded).unwrap();
 
         assert_eq!(decoded, profile);
-        assert_eq!(
-            decoded.disk.unwrap().image,
-            PathBuf::from("rootfs.img")
-        );
+        assert_eq!(decoded.disk.unwrap().image, PathBuf::from("rootfs.img"));
     }
 
     #[test]
@@ -466,11 +465,13 @@ mod tests {
 
     #[test]
     fn rejects_absolute_disk_paths_and_uart_overlap_with_reserved_virtio() {
-        let mut absolute = MachineProfile::default();
-        absolute.disk = Some(DiskProfile {
-            image: PathBuf::from("/tmp/rootfs.img"),
-            read_only: false,
-        });
+        let absolute = MachineProfile {
+            disk: Some(DiskProfile {
+                image: PathBuf::from("/tmp/rootfs.img"),
+                read_only: false,
+            }),
+            ..MachineProfile::default()
+        };
         assert!(matches!(
             absolute.validate(),
             Err(ProfileError::AbsoluteDiskPath(_))
