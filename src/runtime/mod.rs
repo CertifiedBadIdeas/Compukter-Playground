@@ -154,7 +154,7 @@ impl RuntimeHandle {
     }
 
     #[cfg(test)]
-    fn mutate_disk_for_test(&self, offset: usize, value: u8) -> Result<(), String> {
+    pub(crate) fn mutate_disk_for_test(&self, offset: usize, value: u8) -> Result<(), String> {
         let (reply, result) = bounded(1);
         self.messages
             .send(WorkerMessage::MutateDisk {
@@ -594,7 +594,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use compukter_vm::rv32im::encoding::{addi, andi, beq, jal, lbu, lui, sb, sw};
+    use compukter_vm::rv32im::encoding::{addi, andi, beq, jal, lbu, lui, lw, sb, sw};
 
     use super::{
         handle_command, MachineInstance, RuntimeCommand, RuntimeError, RuntimeHandle,
@@ -619,15 +619,24 @@ mod tests {
         )
         .unwrap();
 
-        let instance =
-            MachineInstance::build(&profile, &machine_program_elf(&[jal(0, 0)]), Some(disk))
-                .unwrap();
+        let mut instance = MachineInstance::build(
+            &profile,
+            &machine_program_elf(&[lui(1, 0x10002), lw(2, 1, 0), jal(0, 0)]),
+            Some(disk),
+        )
+        .unwrap();
 
         let inspection = instance.machine.inspection_snapshot();
         assert_eq!(inspection.irq_route_count, 2);
         assert_eq!(inspection.irq_routes[0].source, 1);
         assert_eq!(inspection.irq_routes[1].source, 2);
         assert_eq!(instance.block().unwrap().bytes(), &[0x5a; 512]);
+
+        instance.machine.run(2).unwrap();
+        assert_eq!(
+            instance.machine.inspection_snapshot().hart.registers[2],
+            0x7472_6976
+        );
     }
 
     #[test]

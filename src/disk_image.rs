@@ -90,16 +90,59 @@ pub fn persist_atomic(path: &Path, bytes: &[u8]) -> Result<(), DiskImageError> {
             .create_new(true)
             .open(&temporary)
             .map_err(|source| io_error("create temporary", &temporary, source))?;
+        match fs::metadata(path) {
+            Ok(metadata) => file
+                .set_permissions(metadata.permissions())
+                .map_err(|source| io_error("preserve permissions for", &temporary, source))?,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(io_error("read metadata for", path, source)),
+        }
         file.write_all(bytes)
             .map_err(|source| io_error("write", &temporary, source))?;
         file.sync_all()
             .map_err(|source| io_error("synchronize", &temporary, source))?;
-        fs::rename(&temporary, path).map_err(|source| io_error("replace", path, source))
+        replace_file(&temporary, path).map_err(|source| io_error("replace", path, source))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. The temporary
+    // and destination files are siblings, so MoveFileExW performs a same-volume
+    // replacement rather than its cross-volume copy fallback.
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_capacity(path: &Path, bytes: &[u8]) -> Result<(), DiskImageError> {
@@ -233,5 +276,23 @@ mod tests {
             .collect();
         assert_eq!(entries, vec![OsString::from("disk.img")]);
         assert!(path.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_preserves_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempdir().unwrap();
+        let path = temporary.path().join("disk.img");
+        fs::write(&path, vec![0x11; 512]).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        persist_atomic(&path, &vec![0x22; 512]).unwrap();
+
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

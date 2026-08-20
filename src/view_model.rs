@@ -55,7 +55,7 @@ impl PlaygroundViewModel {
     }
 
     pub fn open_profile(&mut self, path: &Path) -> Result<(), ViewModelError> {
-        let prepared = PreparedLaunch::load(path)?;
+        let mut prepared = PreparedLaunch::load(path)?;
         if self
             .profile
             .as_ref()
@@ -66,6 +66,7 @@ impl PlaygroundViewModel {
                 .as_ref()
                 .ok_or(ViewModelError::NoMachine)?
                 .save_disk()?;
+            prepared.reload_disk()?;
         }
         let runtime = RuntimeHandle::spawn(prepared.profile.clone(), prepared.elf, prepared.disk)?;
         let previous = self.runtime.replace(runtime);
@@ -167,6 +168,16 @@ impl PreparedLaunch {
             elf,
             disk,
         })
+    }
+
+    fn reload_disk(&mut self) -> Result<(), DiskImageError> {
+        self.disk = self
+            .profile
+            .disk
+            .as_ref()
+            .map(|disk| LoadedDiskImage::load(&self.path, disk))
+            .transpose()?;
+        Ok(())
     }
 }
 
@@ -303,6 +314,27 @@ mod tests {
         assert!(view_model.open_profile(&invalid).is_err());
         assert_eq!(view_model.profile_path(), Some(active.as_path()));
         view_model.command(RuntimeCommand::SetPaused(true)).unwrap();
+    }
+
+    #[test]
+    fn reopening_a_shared_image_does_not_restore_bytes_loaded_before_save() {
+        let temporary = tempdir().unwrap();
+        let profile =
+            write_runnable_profile(temporary.path(), "active.toml", Some(("shared.img", false)));
+        let image = temporary.path().join("shared.img");
+        let mut view_model = PlaygroundViewModel::default();
+        view_model.open_profile(&profile).unwrap();
+        view_model
+            .runtime
+            .as_ref()
+            .unwrap()
+            .mutate_disk_for_test(0, 0x66)
+            .unwrap();
+
+        view_model.open_profile(&profile).unwrap();
+        view_model.save_disk().unwrap();
+
+        assert_eq!(fs::read(image).unwrap()[0], 0x66);
     }
 
     fn write_runnable_profile(directory: &Path, name: &str, disk: Option<(&str, bool)>) -> PathBuf {
