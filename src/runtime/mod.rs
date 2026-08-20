@@ -203,14 +203,22 @@ impl RuntimeHandle {
             );
         }
     }
+
+    pub(crate) fn stop_without_save(mut self) {
+        self.stop(false);
+    }
+
+    fn stop(&mut self, save: bool) {
+        if let Some(worker) = self.worker.take() {
+            let _ = self.messages.send(WorkerMessage::Shutdown { save });
+            let _ = worker.join();
+        }
+    }
 }
 
 impl Drop for RuntimeHandle {
     fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            let _ = self.messages.send(WorkerMessage::Shutdown { save: true });
-            let _ = worker.join();
-        }
+        self.stop(true);
     }
 }
 
