@@ -60,7 +60,7 @@ impl PlaygroundViewModel {
             path: firmware_path,
             source,
         })?;
-        let runtime = RuntimeHandle::spawn(profile.clone(), elf)?;
+        let runtime = RuntimeHandle::spawn(profile.clone(), elf, None)?;
         self.runtime = Some(runtime);
         self.profile = Some(profile);
         self.profile_path = Some(path.to_owned());

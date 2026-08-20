@@ -17,11 +17,15 @@ use compukter_vm::rv32_machine::{
     Rv32DeviceHandle, Rv32Machine, Rv32MachineBuilder, Rv32MachineConfig, Rv32MachineInspection,
     Rv32MachineOutcome,
 };
+use compukter_vm_devices::virtio::{
+    VirtioBlockDevice, VirtioBlockError, VirtioMmioDevice, VirtioTransportError,
+};
 use compukter_vm_devices::{Uart16550, Uart16550Diagnostics};
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use thiserror::Error;
 
-use crate::profile::{MachineProfile, RuntimeMode};
+use crate::disk_image::LoadedDiskImage;
+use crate::profile::{MachineProfile, RuntimeMode, VIRTIO_BLOCK_BASE};
 use crate::terminal::{TerminalMode, TerminalProjection, TerminalSnapshot};
 
 const REALTIME_TICK: Duration = Duration::from_millis(50);
@@ -99,9 +103,13 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
-    pub fn spawn(profile: MachineProfile, elf: Vec<u8>) -> Result<Self, RuntimeError> {
+    pub fn spawn(
+        profile: MachineProfile,
+        elf: Vec<u8>,
+        disk: Option<LoadedDiskImage>,
+    ) -> Result<Self, RuntimeError> {
         profile.validate()?;
-        let instance = MachineInstance::build(&profile, &elf)?;
+        let instance = MachineInstance::build(&profile, &elf, disk)?;
         let (commands, receiver) = bounded(COMMAND_CAPACITY);
         let latest = Arc::new(LatestSnapshot::new());
         let worker_latest = Arc::clone(&latest);
@@ -171,10 +179,23 @@ impl Drop for RuntimeHandle {
 struct MachineInstance {
     machine: Rv32Machine,
     uart: Rv32DeviceHandle<Uart16550>,
+    disk: Option<AttachedDisk>,
+}
+
+type BlockHandle = Rv32DeviceHandle<VirtioMmioDevice<VirtioBlockDevice>>;
+
+struct AttachedDisk {
+    path: std::path::PathBuf,
+    read_only: bool,
+    block: BlockHandle,
 }
 
 impl MachineInstance {
-    fn build(profile: &MachineProfile, elf: &[u8]) -> Result<Self, RuntimeError> {
+    fn build(
+        profile: &MachineProfile,
+        elf: &[u8],
+        disk: Option<LoadedDiskImage>,
+    ) -> Result<Self, RuntimeError> {
         let config = Rv32MachineConfig {
             ram_size: profile.machine.ram_bytes,
             debug_limit: profile.machine.debug_limit,
@@ -185,9 +206,29 @@ impl MachineInstance {
             uart.connect();
         }
         let mut builder = Rv32MachineBuilder::from_elf(elf, config)?;
-        let (uart, _) = builder.add_mmio_device_with_irq(profile.uart.base, uart);
+        let (uart, uart_source) = builder.add_mmio_device_with_irq(profile.uart.base, uart);
+        debug_assert_eq!(uart_source.get(), 1);
+        let disk = if let Some(disk) = disk {
+            let (path, bytes, read_only) = disk.into_parts();
+            let block = VirtioBlockDevice::from_bytes(bytes, read_only)?;
+            let transport = VirtioMmioDevice::new(block)?;
+            let (block, block_source) =
+                builder.add_mmio_device_with_irq(VIRTIO_BLOCK_BASE, transport);
+            debug_assert_eq!(block_source.get(), 2);
+            Some(AttachedDisk {
+                path,
+                read_only,
+                block,
+            })
+        } else {
+            None
+        };
         let machine = builder.build()?;
-        Ok(Self { machine, uart })
+        Ok(Self {
+            machine,
+            uart,
+            disk,
+        })
     }
 
     fn uart_mut(&mut self) -> &mut Uart16550 {
@@ -200,6 +241,22 @@ impl MachineInstance {
         self.machine
             .device(self.uart)
             .expect("runtime UART handle invariant")
+    }
+
+    fn block(&self) -> Option<&VirtioBlockDevice> {
+        self.disk
+            .as_ref()
+            .and_then(|disk| self.machine.device(disk.block))
+            .map(VirtioMmioDevice::device)
+    }
+
+    fn cloned_disk_image(&self) -> Option<LoadedDiskImage> {
+        let disk = self.disk.as_ref()?;
+        Some(LoadedDiskImage::from_parts(
+            disk.path.clone(),
+            self.block()?.bytes().to_vec(),
+            disk.read_only,
+        ))
     }
 }
 
@@ -286,7 +343,11 @@ fn handle_command(command: RuntimeCommand, state: &mut WorkerState) -> bool {
                 run_quantum_with_budget(state, 1, false);
             }
         }
-        RuntimeCommand::Reset => match MachineInstance::build(&state.profile, &state.elf) {
+        RuntimeCommand::Reset => match MachineInstance::build(
+            &state.profile,
+            &state.elf,
+            state.instance.cloned_disk_image(),
+        ) {
             Ok(instance) => {
                 state.instance = instance;
                 state.terminal.clear();
@@ -391,6 +452,10 @@ pub enum RuntimeError {
     Profile(#[from] crate::profile::ProfileError),
     #[error(transparent)]
     Build(#[from] compukter_vm::rv32_machine::Rv32MachineBuildError),
+    #[error(transparent)]
+    Block(#[from] VirtioBlockError),
+    #[error(transparent)]
+    VirtioTransport(#[from] VirtioTransportError),
     #[error("could not spawn VM worker: {0}")]
     WorkerSpawn(std::io::Error),
     #[error("VM worker has stopped")]
@@ -399,19 +464,93 @@ pub enum RuntimeError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use compukter_vm::rv32im::encoding::{addi, andi, beq, jal, lbu, lui, sb, sw};
 
-    use super::{RuntimeCommand, RuntimeHandle};
-    use crate::profile::{BackendProfile, MachineProfile};
+    use super::{
+        handle_command, MachineInstance, RuntimeCommand, RuntimeHandle, RuntimeOutcome, WorkerState,
+    };
+    use crate::disk_image::LoadedDiskImage;
+    use crate::profile::{BackendProfile, DiskProfile, MachineProfile};
+    use tempfile::tempdir;
+
+    #[test]
+    fn disk_is_mapped_after_uart_with_stable_irq_source() {
+        let temporary = tempdir().unwrap();
+        fs::write(temporary.path().join("disk.img"), vec![0x5a; 512]).unwrap();
+        let mut profile = MachineProfile::default();
+        profile.machine.backend = BackendProfile::Cached { sets: 16 };
+        let disk = LoadedDiskImage::load(
+            &temporary.path().join("machine.toml"),
+            &DiskProfile {
+                image: PathBuf::from("disk.img"),
+                read_only: false,
+            },
+        )
+        .unwrap();
+
+        let instance =
+            MachineInstance::build(&profile, &machine_program_elf(&[jal(0, 0)]), Some(disk))
+                .unwrap();
+
+        let inspection = instance.machine.inspection_snapshot();
+        assert_eq!(inspection.irq_route_count, 2);
+        assert_eq!(inspection.irq_routes[0].source, 1);
+        assert_eq!(inspection.irq_routes[1].source, 2);
+        assert_eq!(instance.block().unwrap().bytes(), &[0x5a; 512]);
+    }
+
+    #[test]
+    fn reset_preserves_device_bytes_without_saving_the_host_image() {
+        let temporary = tempdir().unwrap();
+        let path = temporary.path().join("disk.img");
+        fs::write(&path, vec![0x11; 512]).unwrap();
+        let mut profile = MachineProfile::default();
+        profile.machine.backend = BackendProfile::Cached { sets: 16 };
+        let disk = LoadedDiskImage::load(
+            &temporary.path().join("machine.toml"),
+            &DiskProfile {
+                image: PathBuf::from("disk.img"),
+                read_only: false,
+            },
+        )
+        .unwrap();
+        let elf = machine_program_elf(&[jal(0, 0)]);
+        let instance = MachineInstance::build(&profile, &elf, Some(disk)).unwrap();
+        let mut state = WorkerState {
+            profile,
+            elf,
+            instance,
+            terminal: crate::terminal::TerminalProjection::default(),
+            paused: true,
+            outcome: RuntimeOutcome::Running,
+            error: None,
+            revision: 0,
+        };
+        let block = state.instance.disk.as_ref().unwrap().block;
+        state
+            .instance
+            .machine
+            .device_mut(block)
+            .unwrap()
+            .device_mut()
+            .bytes_mut()[0] = 0x22;
+
+        handle_command(RuntimeCommand::Reset, &mut state);
+
+        assert_eq!(state.instance.block().unwrap().bytes()[0], 0x22);
+        assert_eq!(fs::read(path).unwrap()[0], 0x11);
+    }
 
     #[test]
     fn paused_worker_steps_exactly_one_guest_instruction() {
         let mut profile = MachineProfile::default();
         profile.machine.backend = BackendProfile::Cached { sets: 16 };
         let elf = machine_program_elf(&[jal(0, 0)]);
-        let runtime = RuntimeHandle::spawn(profile, elf).unwrap();
+        let runtime = RuntimeHandle::spawn(profile, elf, None).unwrap();
         runtime.command(RuntimeCommand::SetPaused(true)).unwrap();
         let paused = runtime.wait_for(|snapshot| snapshot.paused, Duration::from_secs(1));
 
@@ -436,7 +575,7 @@ mod tests {
         let mut profile = MachineProfile::default();
         profile.machine.backend = BackendProfile::Cached { sets: 16 };
         let elf = machine_program_elf(&[jal(0, 0)]);
-        let runtime = RuntimeHandle::spawn(profile, elf).unwrap();
+        let runtime = RuntimeHandle::spawn(profile, elf, None).unwrap();
         runtime.command(RuntimeCommand::SetPaused(true)).unwrap();
         runtime.wait_for(|snapshot| snapshot.paused, Duration::from_secs(1));
         runtime.command(RuntimeCommand::Step).unwrap();
@@ -472,7 +611,7 @@ mod tests {
             addi(5, 0, 3),
             sw(4, 5, 0),
         ]);
-        let runtime = RuntimeHandle::spawn(profile, elf).unwrap();
+        let runtime = RuntimeHandle::spawn(profile, elf, None).unwrap();
 
         runtime
             .command(RuntimeCommand::SendUart(vec![b'Z']))

@@ -28,7 +28,7 @@ fn firmware_prints_banner_sleeps_and_echoes_uart_input() {
         ..MachineProfile::default()
     };
     let instruction_budget = profile.clock.instructions_per_tick;
-    let runtime = RuntimeHandle::spawn(profile, elf).unwrap();
+    let runtime = RuntimeHandle::spawn(profile, elf, None).unwrap();
 
     let idle = runtime.wait_for(
         |snapshot| {

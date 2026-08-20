@@ -63,6 +63,13 @@ impl LoadedDiskImage {
         (self.path, self.bytes, self.read_only)
     }
 
+    pub(crate) fn from_parts(path: PathBuf, bytes: Vec<u8>, read_only: bool) -> Self {
+        Self {
+            path,
+            bytes,
+            read_only,
+        }
+    }
 }
 
 pub fn persist_atomic(path: &Path, bytes: &[u8]) -> Result<(), DiskImageError> {

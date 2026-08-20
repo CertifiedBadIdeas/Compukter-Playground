@@ -34,7 +34,7 @@ fn nuttx_boots_nsh_and_runs_builtin_over_uart() {
 
     let mut profile = MachineProfile::load(&repository.join("profiles/nuttx.toml")).unwrap();
     profile.initial_mode = RuntimeMode::Unbounded;
-    let runtime = RuntimeHandle::spawn(profile, fs::read(output).unwrap()).unwrap();
+    let runtime = RuntimeHandle::spawn(profile, fs::read(output).unwrap(), None).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
 
     let prompt = loop {
