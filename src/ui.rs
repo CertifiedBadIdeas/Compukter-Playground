@@ -99,8 +99,19 @@ impl PlaygroundApp {
                     ui.separator();
                     self.profile_selector(ui);
 
-                    if ui.button("Save").clicked() {
+                    if ui.button("Save profile").clicked() {
                         if let Err(error) = self.view_model.save_profile() {
+                            self.view_model.set_status_error(error);
+                        }
+                    }
+                    if ui
+                        .add_enabled(
+                            self.view_model.can_save_disk(),
+                            egui::Button::new("Save disk"),
+                        )
+                        .clicked()
+                    {
+                        if let Err(error) = self.view_model.save_disk() {
                             self.view_model.set_status_error(error);
                         }
                     }
