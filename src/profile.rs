@@ -17,6 +17,7 @@ use compukter_vm::rv32_machine::{
     Rv32DbtCodeAlignment, Rv32DbtRegisterProfile, Rv32ExecutionBackendConfig, CONTROL_BASE,
     DEBUG_BASE, PLIC_BASE, TIMER_BASE,
 };
+use compukter_vm_devices::virtio::VIRTIO_MMIO_REGION_SIZE;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -24,6 +25,7 @@ pub const PROFILE_SCHEMA_VERSION: u32 = 1;
 const UART_REGISTER_BYTES: u32 = 8;
 const PLATFORM_MMIO_BYTES: u32 = 256;
 const PLIC_BYTES: u32 = 0x0020_1000;
+pub const VIRTIO_BLOCK_BASE: u32 = 0x1000_2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +35,8 @@ pub struct MachineProfile {
     pub machine: MachineConfigProfile,
     pub clock: ClockProfile,
     pub uart: UartProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskProfile>,
     pub initial_mode: RuntimeMode,
 }
 
@@ -56,6 +60,7 @@ impl Default for MachineProfile {
                 base: 0x1000_1000,
                 connected: true,
             },
+            disk: None,
             initial_mode: RuntimeMode::Realtime,
         }
     }
@@ -116,6 +121,11 @@ impl MachineProfile {
                 self.firmware.elf.clone(),
             ));
         }
+        if let Some(disk) = &self.disk {
+            if disk.image.is_absolute() {
+                return Err(ProfileError::AbsoluteDiskPath(disk.image.clone()));
+            }
+        }
         if self.machine.ram_bytes == 0 || self.machine.ram_bytes > CONTROL_BASE as usize {
             return Err(ProfileError::InvalidRamSize(self.machine.ram_bytes));
         }
@@ -139,10 +149,16 @@ impl MachineProfile {
             .any(|base| ranges_overlap(self.uart.base, uart_end, base, base + PLATFORM_MMIO_BYTES));
         let overlaps_plic =
             ranges_overlap(self.uart.base, uart_end, PLIC_BASE, PLIC_BASE + PLIC_BYTES);
-        if in_ram || overlaps_platform || overlaps_plic {
+        let overlaps_virtio = ranges_overlap(
+            self.uart.base,
+            uart_end,
+            VIRTIO_BLOCK_BASE,
+            VIRTIO_BLOCK_BASE + VIRTIO_MMIO_REGION_SIZE,
+        );
+        if in_ram || overlaps_platform || overlaps_plic || overlaps_virtio {
             return Err(ProfileError::InvalidUartBase {
                 base: self.uart.base,
-                reason: "register range overlaps RAM or built-in platform MMIO",
+                reason: "register range overlaps RAM or reserved platform MMIO",
             });
         }
         Ok(())
@@ -157,6 +173,14 @@ const fn ranges_overlap(a_start: u32, a_end: u32, b_start: u32, b_end: u32) -> b
 #[serde(deny_unknown_fields)]
 pub struct FirmwareProfile {
     pub elf: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiskProfile {
+    pub image: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +344,8 @@ pub enum ProfileError {
     UnsupportedSchema(u32),
     #[error("firmware path must be relative to the profile: {0}")]
     AbsoluteFirmwarePath(PathBuf),
+    #[error("disk image path must be relative to the profile: {0}")]
+    AbsoluteDiskPath(PathBuf),
     #[error("invalid RAM size {0}")]
     InvalidRamSize(usize),
     #[error("{0} must be greater than zero")]
@@ -336,9 +362,11 @@ pub enum ProfileError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{MachineProfile, ProfileError, PROFILE_SCHEMA_VERSION};
+    use super::{
+        DiskProfile, MachineProfile, ProfileError, PROFILE_SCHEMA_VERSION, VIRTIO_BLOCK_BASE,
+    };
 
     #[test]
     fn profile_round_trips_and_resolves_firmware_relative_to_profile() {
@@ -409,5 +437,50 @@ mod tests {
         let profile = MachineProfile::from_toml(include_str!("../profiles/default.toml")).unwrap();
 
         assert_eq!(profile, MachineProfile::default());
+    }
+
+    #[test]
+    fn schema_one_profile_accepts_an_optional_relative_disk() {
+        let mut profile = MachineProfile::default();
+        profile.disk = Some(DiskProfile {
+            image: PathBuf::from("rootfs.img"),
+            read_only: true,
+        });
+
+        let encoded = profile.to_toml().unwrap();
+        let decoded = MachineProfile::from_toml(&encoded).unwrap();
+
+        assert_eq!(decoded, profile);
+        assert_eq!(
+            decoded.disk.unwrap().image,
+            PathBuf::from("rootfs.img")
+        );
+    }
+
+    #[test]
+    fn schema_one_profile_without_disk_keeps_existing_behavior() {
+        let profile = MachineProfile::from_toml(include_str!("../profiles/default.toml")).unwrap();
+
+        assert!(profile.disk.is_none());
+    }
+
+    #[test]
+    fn rejects_absolute_disk_paths_and_uart_overlap_with_reserved_virtio() {
+        let mut absolute = MachineProfile::default();
+        absolute.disk = Some(DiskProfile {
+            image: PathBuf::from("/tmp/rootfs.img"),
+            read_only: false,
+        });
+        assert!(matches!(
+            absolute.validate(),
+            Err(ProfileError::AbsoluteDiskPath(_))
+        ));
+
+        let mut overlap = MachineProfile::default();
+        overlap.uart.base = VIRTIO_BLOCK_BASE;
+        assert!(matches!(
+            overlap.validate(),
+            Err(ProfileError::InvalidUartBase { .. })
+        ));
     }
 }
