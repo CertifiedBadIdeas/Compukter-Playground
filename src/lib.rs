@@ -9,6 +9,7 @@
  * (at your option) any later version.
  */
 
+pub mod disk_image;
 pub mod profile;
 pub mod profile_catalog;
 pub mod runtime;
