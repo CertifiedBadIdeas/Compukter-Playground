@@ -9,6 +9,7 @@
  * (at your option) any later version.
  */
 
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -24,7 +25,7 @@ use compukter_vm_devices::{Uart16550, Uart16550Diagnostics};
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use thiserror::Error;
 
-use crate::disk_image::LoadedDiskImage;
+use crate::disk_image::{persist_atomic, DiskImageError, LoadedDiskImage};
 use crate::profile::{MachineProfile, RuntimeMode, VIRTIO_BLOCK_BASE};
 use crate::terminal::{TerminalMode, TerminalProjection, TerminalSnapshot};
 
@@ -42,7 +43,21 @@ pub enum RuntimeCommand {
     SendUart(Vec<u8>),
     SetUartConnected(bool),
     ClearTerminal,
-    Shutdown,
+}
+
+#[derive(Debug)]
+enum WorkerMessage {
+    Command(RuntimeCommand),
+    SaveDisk(Sender<Result<PathBuf, RuntimeError>>),
+    Shutdown {
+        save: bool,
+    },
+    #[cfg(test)]
+    MutateDisk {
+        offset: usize,
+        value: u8,
+        reply: Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +112,7 @@ impl LatestSnapshot {
 
 #[derive(Debug)]
 pub struct RuntimeHandle {
-    commands: Sender<RuntimeCommand>,
+    messages: Sender<WorkerMessage>,
     latest: Arc<LatestSnapshot>,
     worker: Option<JoinHandle<()>>,
 }
@@ -110,7 +125,7 @@ impl RuntimeHandle {
     ) -> Result<Self, RuntimeError> {
         profile.validate()?;
         let instance = MachineInstance::build(&profile, &elf, disk)?;
-        let (commands, receiver) = bounded(COMMAND_CAPACITY);
+        let (messages, receiver) = bounded(COMMAND_CAPACITY);
         let latest = Arc::new(LatestSnapshot::new());
         let worker_latest = Arc::clone(&latest);
         let worker = thread::Builder::new()
@@ -118,16 +133,39 @@ impl RuntimeHandle {
             .spawn(move || worker_main(profile, elf, instance, receiver, worker_latest))
             .map_err(RuntimeError::WorkerSpawn)?;
         Ok(Self {
-            commands,
+            messages,
             latest,
             worker: Some(worker),
         })
     }
 
     pub fn command(&self, command: RuntimeCommand) -> Result<(), RuntimeError> {
-        self.commands
-            .send(command)
+        self.messages
+            .send(WorkerMessage::Command(command))
             .map_err(|_| RuntimeError::WorkerStopped)
+    }
+
+    pub fn save_disk(&self) -> Result<PathBuf, RuntimeError> {
+        let (reply, result) = bounded(1);
+        self.messages
+            .send(WorkerMessage::SaveDisk(reply))
+            .map_err(|_| RuntimeError::WorkerStopped)?;
+        result.recv().map_err(|_| RuntimeError::WorkerStopped)?
+    }
+
+    #[cfg(test)]
+    fn mutate_disk_for_test(&self, offset: usize, value: u8) -> Result<(), String> {
+        let (reply, result) = bounded(1);
+        self.messages
+            .send(WorkerMessage::MutateDisk {
+                offset,
+                value,
+                reply,
+            })
+            .map_err(|_| "VM worker has stopped".to_string())?;
+        result
+            .recv()
+            .map_err(|_| "VM worker has stopped".to_string())?
     }
 
     pub fn snapshot(&self) -> Option<Arc<RuntimeSnapshot>> {
@@ -169,8 +207,8 @@ impl RuntimeHandle {
 
 impl Drop for RuntimeHandle {
     fn drop(&mut self) {
-        let _ = self.commands.send(RuntimeCommand::Shutdown);
         if let Some(worker) = self.worker.take() {
+            let _ = self.messages.send(WorkerMessage::Shutdown { save: true });
             let _ = worker.join();
         }
     }
@@ -250,6 +288,18 @@ impl MachineInstance {
             .map(VirtioMmioDevice::device)
     }
 
+    #[cfg(test)]
+    fn block_mut(&mut self) -> Option<&mut VirtioBlockDevice> {
+        let handle = self.disk.as_ref()?.block;
+        self.machine
+            .device_mut(handle)
+            .map(VirtioMmioDevice::device_mut)
+    }
+
+    fn has_writable_disk(&self) -> bool {
+        self.disk.as_ref().is_some_and(|disk| !disk.read_only)
+    }
+
     fn cloned_disk_image(&self) -> Option<LoadedDiskImage> {
         let disk = self.disk.as_ref()?;
         Some(LoadedDiskImage::from_parts(
@@ -267,7 +317,8 @@ struct WorkerState {
     terminal: TerminalProjection,
     paused: bool,
     outcome: RuntimeOutcome,
-    error: Option<String>,
+    machine_error: Option<String>,
+    storage_error: Option<String>,
     revision: u64,
 }
 
@@ -275,7 +326,7 @@ fn worker_main(
     profile: MachineProfile,
     elf: Vec<u8>,
     instance: MachineInstance,
-    commands: Receiver<RuntimeCommand>,
+    messages: Receiver<WorkerMessage>,
     latest: Arc<LatestSnapshot>,
 ) {
     let mut state = WorkerState {
@@ -285,21 +336,22 @@ fn worker_main(
         instance,
         terminal: TerminalProjection::default(),
         outcome: RuntimeOutcome::Running,
-        error: None,
+        machine_error: None,
+        storage_error: None,
         revision: 0,
     };
     publish(&mut state, &latest);
     let mut next_tick = Instant::now() + REALTIME_TICK;
 
     loop {
-        let command = if state.paused {
-            commands.recv().ok()
+        let message = if state.paused {
+            messages.recv().ok()
         } else {
             match state.profile.initial_mode {
                 RuntimeMode::Realtime => {
                     let wait = next_tick.saturating_duration_since(Instant::now());
-                    match commands.recv_timeout(wait) {
-                        Ok(command) => Some(command),
+                    match messages.recv_timeout(wait) {
+                        Ok(message) => Some(message),
                         Err(RecvTimeoutError::Timeout) => {
                             run_quantum(&mut state, true);
                             publish(&mut state, &latest);
@@ -312,8 +364,8 @@ fn worker_main(
                         Err(RecvTimeoutError::Disconnected) => None,
                     }
                 }
-                RuntimeMode::Unbounded => match commands.try_recv() {
-                    Ok(command) => Some(command),
+                RuntimeMode::Unbounded => match messages.try_recv() {
+                    Ok(message) => Some(message),
                     Err(TryRecvError::Empty) => {
                         run_quantum(&mut state, true);
                         publish(&mut state, &latest);
@@ -324,18 +376,52 @@ fn worker_main(
             }
         };
 
-        let Some(command) = command else {
+        let Some(message) = message else {
             break;
         };
-        if handle_command(command, &mut state) {
-            break;
+        match message {
+            WorkerMessage::Command(command) => handle_command(command, &mut state),
+            WorkerMessage::SaveDisk(reply) => {
+                let result = save_disk(&mut state);
+                publish(&mut state, &latest);
+                let _ = reply.send(result);
+                next_tick = Instant::now() + REALTIME_TICK;
+                continue;
+            }
+            WorkerMessage::Shutdown { save } => {
+                if save && state.instance.has_writable_disk() {
+                    if let Err(error) = save_disk(&mut state) {
+                        eprintln!("could not save disk during VM shutdown: {error}");
+                    }
+                }
+                break;
+            }
+            #[cfg(test)]
+            WorkerMessage::MutateDisk {
+                offset,
+                value,
+                reply,
+            } => {
+                let result = state
+                    .instance
+                    .block_mut()
+                    .ok_or_else(|| "no disk is attached".to_string())
+                    .and_then(|block| {
+                        block
+                            .bytes_mut()
+                            .get_mut(offset)
+                            .ok_or_else(|| format!("disk offset {offset} is out of range"))
+                    })
+                    .map(|byte| *byte = value);
+                let _ = reply.send(result);
+            }
         }
         publish(&mut state, &latest);
         next_tick = Instant::now() + REALTIME_TICK;
     }
 }
 
-fn handle_command(command: RuntimeCommand, state: &mut WorkerState) -> bool {
+fn handle_command(command: RuntimeCommand, state: &mut WorkerState) {
     match command {
         RuntimeCommand::SetPaused(paused) => state.paused = paused,
         RuntimeCommand::Step => {
@@ -352,7 +438,7 @@ fn handle_command(command: RuntimeCommand, state: &mut WorkerState) -> bool {
                 state.instance = instance;
                 state.terminal.clear();
                 state.outcome = RuntimeOutcome::Running;
-                state.error = None;
+                state.machine_error = None;
             }
             Err(error) => fault(state, error.to_string()),
         },
@@ -370,9 +456,7 @@ fn handle_command(command: RuntimeCommand, state: &mut WorkerState) -> bool {
             }
         }
         RuntimeCommand::ClearTerminal => state.terminal.clear(),
-        RuntimeCommand::Shutdown => return true,
     }
-    false
 }
 
 fn run_quantum(state: &mut WorkerState, advance_time: bool) {
@@ -425,8 +509,34 @@ fn summarize_outcome(outcome: Rv32MachineOutcome) -> RuntimeOutcome {
     }
 }
 
+fn save_disk(state: &mut WorkerState) -> Result<PathBuf, RuntimeError> {
+    let result: Result<PathBuf, RuntimeError> = (|| {
+        let disk = state.instance.disk.as_ref().ok_or(RuntimeError::NoDisk)?;
+        if disk.read_only {
+            return Err(DiskImageError::ReadOnly(disk.path.clone()).into());
+        }
+        let path = disk.path.clone();
+        let bytes = state
+            .instance
+            .block()
+            .expect("runtime block handle invariant")
+            .bytes();
+        persist_atomic(&path, bytes)?;
+        Ok(path)
+    })();
+
+    match &result {
+        Ok(_) => state.storage_error = None,
+        Err(error) => {
+            state.storage_error = Some(error.to_string());
+            state.paused = true;
+        }
+    }
+    result
+}
+
 fn fault(state: &mut WorkerState, message: String) {
-    state.error = Some(message);
+    state.machine_error = Some(message);
     state.outcome = RuntimeOutcome::Faulted;
     state.paused = true;
 }
@@ -442,7 +552,11 @@ fn publish(state: &mut WorkerState, latest: &LatestSnapshot) {
         uart_connected: state.instance.uart().is_connected(),
         uart: state.instance.uart().diagnostics(),
         terminal: state.terminal.snapshot(),
-        error: state.error.clone(),
+        error: state
+            .machine_error
+            .as_ref()
+            .or(state.storage_error.as_ref())
+            .cloned(),
     });
 }
 
@@ -456,6 +570,10 @@ pub enum RuntimeError {
     Block(#[from] VirtioBlockError),
     #[error(transparent)]
     VirtioTransport(#[from] VirtioTransportError),
+    #[error(transparent)]
+    Disk(#[from] DiskImageError),
+    #[error("no disk is attached")]
+    NoDisk,
     #[error("could not spawn VM worker: {0}")]
     WorkerSpawn(std::io::Error),
     #[error("VM worker has stopped")]
@@ -471,11 +589,12 @@ mod tests {
     use compukter_vm::rv32im::encoding::{addi, andi, beq, jal, lbu, lui, sb, sw};
 
     use super::{
-        handle_command, MachineInstance, RuntimeCommand, RuntimeHandle, RuntimeOutcome, WorkerState,
+        handle_command, MachineInstance, RuntimeCommand, RuntimeError, RuntimeHandle,
+        RuntimeOutcome, WorkerState,
     };
-    use crate::disk_image::LoadedDiskImage;
+    use crate::disk_image::{DiskImageError, LoadedDiskImage};
     use crate::profile::{BackendProfile, DiskProfile, MachineProfile};
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
     #[test]
     fn disk_is_mapped_after_uart_with_stable_irq_source() {
@@ -527,7 +646,8 @@ mod tests {
             terminal: crate::terminal::TerminalProjection::default(),
             paused: true,
             outcome: RuntimeOutcome::Running,
-            error: None,
+            machine_error: None,
+            storage_error: None,
             revision: 0,
         };
         let block = state.instance.disk.as_ref().unwrap().block;
@@ -543,6 +663,63 @@ mod tests {
 
         assert_eq!(state.instance.block().unwrap().bytes()[0], 0x22);
         assert_eq!(fs::read(path).unwrap()[0], 0x11);
+    }
+
+    #[test]
+    fn acknowledged_save_persists_current_device_bytes() {
+        let temporary = tempdir().unwrap();
+        let (runtime, path) = runtime_with_disk(&temporary, false);
+        runtime.mutate_disk_for_test(0, 0x44).unwrap();
+
+        let saved = runtime.save_disk().unwrap();
+
+        assert_eq!(saved, path);
+        assert_eq!(fs::read(path).unwrap()[0], 0x44);
+    }
+
+    #[test]
+    fn failed_save_pauses_but_keeps_the_worker_recoverable() {
+        let temporary = tempdir().unwrap();
+        let (runtime, path) = runtime_with_disk(&temporary, false);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+
+        assert!(runtime.save_disk().is_err());
+        let failed = runtime.wait_for(
+            |snapshot| snapshot.paused && snapshot.error.is_some(),
+            Duration::from_secs(1),
+        );
+        assert!(failed.error.as_deref().unwrap().contains("disk image"));
+
+        fs::remove_dir(&path).unwrap();
+        runtime.save_disk().unwrap();
+        let recovered =
+            runtime.wait_for(|snapshot| snapshot.error.is_none(), Duration::from_secs(1));
+        assert!(recovered.paused);
+    }
+
+    #[test]
+    fn read_only_disk_refuses_host_persistence() {
+        let temporary = tempdir().unwrap();
+        let (runtime, path) = runtime_with_disk(&temporary, true);
+        let original = fs::read(&path).unwrap();
+
+        assert!(matches!(
+            runtime.save_disk(),
+            Err(RuntimeError::Disk(DiskImageError::ReadOnly(_)))
+        ));
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn dropping_runtime_saves_before_the_worker_is_joined() {
+        let temporary = tempdir().unwrap();
+        let (runtime, path) = runtime_with_disk(&temporary, false);
+        runtime.mutate_disk_for_test(0, 0x77).unwrap();
+
+        drop(runtime);
+
+        assert_eq!(fs::read(path).unwrap()[0], 0x77);
     }
 
     #[test]
@@ -652,6 +829,24 @@ mod tests {
         put_u32(&mut elf, ELF_HEADER + 28, PAGE as u32);
         elf[PAGE..].copy_from_slice(&code);
         elf
+    }
+
+    fn runtime_with_disk(temporary: &TempDir, read_only: bool) -> (RuntimeHandle, PathBuf) {
+        let path = temporary.path().join("disk.img");
+        fs::write(&path, vec![0x11; 512]).unwrap();
+        let disk = LoadedDiskImage::load(
+            &temporary.path().join("machine.toml"),
+            &DiskProfile {
+                image: PathBuf::from("disk.img"),
+                read_only,
+            },
+        )
+        .unwrap();
+        let mut profile = MachineProfile::default();
+        profile.machine.backend = BackendProfile::Cached { sets: 16 };
+        let runtime =
+            RuntimeHandle::spawn(profile, machine_program_elf(&[jal(0, 0)]), Some(disk)).unwrap();
+        (runtime, path)
     }
 
     fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
