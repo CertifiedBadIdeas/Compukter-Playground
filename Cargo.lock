@@ -653,6 +653,7 @@ dependencies = [
  "compukter-vm-devices",
  "crossbeam-channel",
  "eframe",
+ "libc",
  "serde",
  "tempfile",
  "thiserror 2.0.20",

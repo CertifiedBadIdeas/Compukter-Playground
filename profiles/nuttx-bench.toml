@@ -1,0 +1,25 @@
+schema_version = 1
+initial_mode = "unbounded"
+
+[firmware]
+elf = "nuttx-bench.elf"
+
+[machine]
+ram_bytes = 1048576
+debug_limit = 0
+
+[machine.backend]
+kind = "cached_dbt"
+sets = 256
+max_instructions = 16
+scratch_bytes = 8192
+cache_bytes = 131072
+alignment = 64
+
+[clock]
+instructions_per_tick = 100000
+timer_units_per_tick = 1
+
+[uart]
+base = 0x10001000
+connected = true

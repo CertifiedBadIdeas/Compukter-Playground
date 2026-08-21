@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
+ifneq ($(CONFIG_EXAMPLES_COMPUKTER_BENCH),)
+CONFIGURED_APPS += $(APPDIR)/examples/compukter_bench
+endif

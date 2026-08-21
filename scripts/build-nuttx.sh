@@ -9,6 +9,8 @@ case "${1:-profiles/nuttx.elf}" in
   *) OUTPUT_ELF="$REPOSITORY/${1:-profiles/nuttx.elf}" ;;
 esac
 
+NUTTX_CONFIG=${2:-nsh}
+
 for tool in git make clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-readelf \
   riscv64-elf-gcc
 do
@@ -28,22 +30,38 @@ fi
 if [ -n "${NUTTX_KCONFIG_BIN:-}" ]
 then
   KCONFIG_TOOLS=$NUTTX_KCONFIG_BIN
+  if [ -x "$KCONFIG_TOOLS/menuconfig" ] && \
+     [ -x "$KCONFIG_TOOLS/olddefconfig" ]
+  then
+    KCONFIG_FLAVOR=kconfiglib
+  else
+    KCONFIG_FLAVOR=frontends
+  fi
 elif command -v kconfig-conf >/dev/null 2>&1 && \
      command -v kconfig-tweak >/dev/null 2>&1
 then
   KCONFIG_TOOLS=$(dirname -- "$(command -v kconfig-conf)")
+  KCONFIG_FLAVOR=frontends
+elif command -v menuconfig >/dev/null 2>&1 && \
+     command -v olddefconfig >/dev/null 2>&1
+then
+  KCONFIG_TOOLS=$(dirname -- "$(command -v menuconfig)")
+  KCONFIG_FLAVOR=kconfiglib
 else
-  echo "NuttX requires kconfig-frontends; install it or set NUTTX_KCONFIG_BIN" >&2
+  echo "NuttX requires kconfig-frontends or Python kconfiglib; install one or set NUTTX_KCONFIG_BIN" >&2
   exit 1
 fi
 
-for tool in kconfig-conf kconfig-tweak
-do
-  [ -x "$KCONFIG_TOOLS/$tool" ] || {
-    echo "NUTTX_KCONFIG_BIN is missing executable $tool: $KCONFIG_TOOLS" >&2
-    exit 1
-  }
-done
+if [ "$KCONFIG_FLAVOR" = frontends ]
+then
+  for tool in kconfig-conf kconfig-tweak
+  do
+    [ -x "$KCONFIG_TOOLS/$tool" ] || {
+      echo "NUTTX_KCONFIG_BIN is missing executable $tool: $KCONFIG_TOOLS" >&2
+      exit 1
+    }
+  done
+fi
 
 SOURCE_CACHE="${TMPDIR:-/tmp}/compukter-playground-nuttx/sources"
 
@@ -119,7 +137,7 @@ then
 fi
 
 (cd "$BUILD_ROOT/nuttx" && PATH="$KCONFIG_TOOLS:$PATH" \
-  ./tools/configure.sh -a ../apps compukter-vm:nsh)
+  ./tools/configure.sh -a ../apps "compukter-vm:$NUTTX_CONFIG")
 
 for expected in \
   'CONFIG_ARCH_CHIP_COMPUKTER=y' \
